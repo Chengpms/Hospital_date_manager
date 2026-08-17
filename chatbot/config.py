@@ -8,7 +8,23 @@ import logging
 from pathlib import Path
 from dataclasses import dataclass
 
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    load_dotenv = None
+
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_environment() -> None:
+    """Carga variables desde .env si existen en la carpeta del chatbot."""
+    env_path = BASE_DIR / ".env"
+    if env_path.exists() and load_dotenv is not None:
+        load_dotenv(dotenv_path=env_path, override=False)
+
+
+load_environment()
+
 
 @dataclass
 class ModelConfig:
@@ -17,9 +33,9 @@ class ModelConfig:
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     default_provider: str = os.getenv("DEFAULT_PROVIDER", "ollama")
     default_model: str = os.getenv("DEFAULT_MODEL", "qwen3:8b")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     temperature: float = 0.0
     max_tokens: int = 1500
-    # Nuevo parámetro extraído para cumplir las reglas de arquitectura[cite: 1]
     request_timeout: int = int(os.getenv("LLM_TIMEOUT", "120"))
 
 @dataclass

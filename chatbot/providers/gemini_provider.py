@@ -4,7 +4,8 @@ Garantiza el aislamiento de la lógica de comunicación externa.
 """
 
 import logging
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import List, Dict, Any
 
 from .base_provider import BaseProvider
@@ -29,21 +30,11 @@ class GeminiProvider(BaseProvider):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Configuración del SDK
-        genai.configure(api_key=api_key)
-        
-        # Corrección del modelo según la documentación oficial del proyecto[cite: 3]
-        self.model_name = "gemini-3.6-flash" 
-        
-        # Forzamos la salida en JSON puro a nivel de API
-        self.generation_config = genai.types.GenerationConfig(
+        self.model_name = LLM_CONFIG.gemini_model or "gemini-2.0-flash"
+        self.client = genai.Client(api_key=api_key)
+        self.generation_config = types.GenerateContentConfig(
             temperature=LLM_CONFIG.temperature,
-            response_mime_type="application/json"
-        )
-        
-        self.client = genai.GenerativeModel(
-            model_name=self.model_name,
-            generation_config=self.generation_config
+            response_mime_type="application/json",
         )
         logger.info(f"GeminiProvider inicializado con el modelo: {self.model_name}")
 
@@ -51,13 +42,13 @@ class GeminiProvider(BaseProvider):
         """
         Convierte el formato estándar de mensajes al formato requerido por Gemini.
         """
-        gemini_messages = []
+        gemini_messages: List[Dict[str, Any]] = []
         for msg in messages:
             role = msg["role"]
             gemini_role = "model" if role == "assistant" else "user"
             gemini_messages.append({
                 "role": gemini_role,
-                "parts": [msg["content"]]
+                "parts": [{"text": msg["content"]}]
             })
         return gemini_messages
 
@@ -75,13 +66,14 @@ class GeminiProvider(BaseProvider):
             RuntimeError: Si ocurre un error en la comunicación con la API.
         """
         try:
-            formatted_messages = self._convert_messages_format(messages)
             logger.debug("Enviando petición a Gemini API")
-            
-            response = self.client.generate_content(formatted_messages)
-            
-            return self._clean_json_response(response.text)
-            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=self._convert_messages_format(messages),
+                config=self.generation_config,
+            )
+            text = response.text if hasattr(response, "text") else str(response)
+            return self._clean_json_response(text)
         except Exception as e:
             error_msg = f"Error en la comunicación con Gemini API: {str(e)}"
             logger.error(error_msg)
