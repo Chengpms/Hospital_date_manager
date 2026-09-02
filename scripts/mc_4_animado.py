@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-mc_4_animado: Motor de Eventos Discretos con Llegadas Estocásticas (Johnson SU),
-Descanso Flexible y Citas Dinámicas.
+mc_4_animado: Motor de Eventos Discretos.
+- 3 Escenarios: Tradicional Fijo, Tradicional Flexible, e IA Inteligente.
+- Llegadas Estocásticas (Johnson SU), Hora de Informes y Menú Interactivo.
 """
 
 import os
@@ -17,7 +18,7 @@ import joblib
 from PIL import Image
 from scipy.stats import johnsonsu
 
-print("🏥 INICIANDO SIMULACIÓN DE EVENTOS DISCRETOS (DISTRIBUCIÓN JOHNSON SU)...")
+print("🏥 INICIANDO SIMULACIÓN (TRIPLE ESCENARIO: FIJO vs FLEXIBLE vs IA)...")
 print("-" * 75)
 
 # --- CONFIGURACIÓN DE RUTAS ---
@@ -32,9 +33,11 @@ OUTPUT_DIR = ROOT_DIR / "scripts"
 DAYS_IN_MONTH = 30
 SLOT_MINUTES = 10
 WORK_START_HOUR = 9
-WORK_END_HOUR = 14
+WORK_END_HOUR = 15 # 14:00 a 15:00 es hora de informes
 TOTAL_SLOTS = ((WORK_END_HOUR - WORK_START_HOUR) * 60) // SLOT_MINUTES
+
 EMPTY_BREAK_SLOTS = {12, 13} 
+ADMIN_SLOTS = set(range(30, 36)) 
 
 FEATURES = [
     'Age', 'Scholarship', 'Hipertension', 'Diabetes', 'Alcoholism', 
@@ -74,9 +77,8 @@ def create_schedule(day_patients_pool, smart_overbooking=False, umbral_riesgo=0.
     agenda = {slot: [] for slot in range(TOTAL_SLOTS)}
     pool_idx = 0
     overbookings_hechos = 0
-    skip_slots = set(EMPTY_BREAK_SLOTS)
+    skip_slots = EMPTY_BREAK_SLOTS.union(ADMIN_SLOTS)
     
-    # Asignación Base
     for slot in range(TOTAL_SLOTS):
         if slot in skip_slots: continue
         if pool_idx < len(day_patients_pool):
@@ -89,40 +91,34 @@ def create_schedule(day_patients_pool, smart_overbooking=False, umbral_riesgo=0.
             if slot in skip_slots: continue
             if agenda[slot]:
                 titular = agenda[slot][0]
-                if titular["prob_no_show"] > umbral_riesgo and pool_idx < len(day_patients_pool):
-                    agenda[slot].append(day_patients_pool[pool_idx])
-                    pool_idx += 1
-                    overbookings_hechos += 1
+                
+                # Miramos quién es el siguiente en la lista de espera
+                if pool_idx < len(day_patients_pool):
+                    candidato = day_patients_pool[pool_idx]
+                    if titular["prob_no_show"] > umbral_riesgo or candidato["prob_no_show"] > umbral_riesgo:
+                        agenda[slot].append(candidato)
+                        pool_idx += 1
+                        overbookings_hechos += 1
     return agenda, overbookings_hechos
 
-def simulate_day_discrete_events(agenda):
-    """
-    Motor de Eventos Discretos: Simula la sala de espera minuto a minuto 
-    aplicando la distribución Johnson SU para el desfase de llegadas.
-    """
+def simulate_day_discrete_events(agenda, descanso_fijo=False):
     slots_status = np.full(TOTAL_SLOTS, 3, dtype=int)
     pacientes_del_dia = []
     
-    # 1. Generar la hora de llegada exacta de quienes NO faltan
     for slot in range(TOTAL_SLOTS):
         for p in agenda[slot]:
             if not p["real_no_show"]:
-                # Parámetros del paper médico para la Johnson SU
                 desfase = johnsonsu.rvs(a=-0.596, b=1.630, loc=-1.757, scale=24.270, size=1)[0]
-                # Limitamos para que nadie llegue 2 horas antes ni 3 horas tarde
-                desfase = np.clip(desfase, -45, 60) 
-                
+                desfase = np.clip(desfase, -45, 10)
                 minuto_citado = slot * SLOT_MINUTES
                 minuto_llegada = minuto_citado + desfase
                 
-                # Guardamos la ficha del paciente
                 pacientes_del_dia.append({
                     "slot_citado": slot,
                     "minuto_citado": minuto_citado,
-                    "minuto_llegada": max(0, minuto_llegada) # No pueden llegar antes de abrir (min 0)
+                    "minuto_llegada": max(0, minuto_llegada)
                 })
 
-    # Ordenamos a todos por el minuto en el que entran por la puerta de la clínica
     pacientes_del_dia.sort(key=lambda x: x["minuto_llegada"])
     
     sala_de_espera = []
@@ -130,70 +126,92 @@ def simulate_day_discrete_events(agenda):
     atendidos = 0
     solapamientos = 0
     max_retraso_dia = 0
-    descansos_pendientes = 2
     
-    # 2. El reloj del médico (Avanza slot a slot, 10 mins por paciente)
+    descansos_pendientes = 2
+    en_descanso = False
+    
     for slot_actual in range(TOTAL_SLOTS):
         minuto_actual_reloj = slot_actual * SLOT_MINUTES
         
-        # Ingresan a la sala de espera los que hayan llegado hasta este minuto
         while idx_llegadas < len(pacientes_del_dia) and pacientes_del_dia[idx_llegadas]["minuto_llegada"] <= minuto_actual_reloj + 9.99:
             sala_de_espera.append(pacientes_del_dia[idx_llegadas])
             idx_llegadas += 1
 
-        # Detectar cuellos de botella reales en la sala física
-        if len(sala_de_espera) > 1:
+        if len(sala_de_espera) > 1 and slot_actual < 30:
             solapamientos += 1
 
-        # Lógica de Descanso Flexible
-        if descansos_pendientes > 0 and slot_actual >= 11:
-            if len(sala_de_espera) == 0 or slot_actual >= 16:
-                slots_status[slot_actual] = 4 # Médico toma café
-                descansos_pendientes -= 1
-                continue
+        # --- LÓGICA DE HORA DE INFORMES ---
+        if slot_actual >= 30:
+            if len(sala_de_espera) > 0:
+                sala_de_espera.sort(key=lambda x: x["slot_citado"])
+                paciente_atendido = sala_de_espera.pop(0)
+                tiempo_esperando = max(0, minuto_actual_reloj - max(paciente_atendido["minuto_citado"], paciente_atendido["minuto_llegada"]))
+                if tiempo_esperando > max_retraso_dia: max_retraso_dia = tiempo_esperando
                 
-        # Lógica de Atención: Prioridad por Hora de Cita (El que antes tuviera la cita pasa primero)
+                slots_status[slot_actual] = 2 
+                atendidos += 1
+            else:
+                slots_status[slot_actual] = 5 
+            continue 
+
+        # --- LÓGICA DE DESCANSO (FIJO VS FLEXIBLE) ---
+        if descanso_fijo:
+            # Normalmente descanso a las 11:30 
+            if slot_actual == 15 or slot_actual == 16:
+                slots_status[slot_actual] = 4
+                continue
+        else:
+            if en_descanso:
+                slots_status[slot_actual] = 4 
+                descansos_pendientes -= 1
+                if descansos_pendientes == 0:
+                    en_descanso = False
+                continue
+
+            if descansos_pendientes == 2 and slot_actual >= 11:
+                if len(sala_de_espera) == 0 or slot_actual >= 16:
+                    slots_status[slot_actual] = 4
+                    descansos_pendientes -= 1
+                    en_descanso = True
+                    continue
+                
+        # --- LÓGICA DE ATENCIÓN NORMAL ---
         if len(sala_de_espera) > 0:
-            # Ordenamos la sala por la hora a la que estaban CITADOS, no a la que llegaron
             sala_de_espera.sort(key=lambda x: x["slot_citado"])
             paciente_atendido = sala_de_espera.pop(0)
             
-            # El retraso lo sufre el paciente desde que llega o desde su hora de cita (lo que sea mayor)
-            tiempo_esperando = minuto_actual_reloj - max(paciente_atendido["minuto_citado"], paciente_atendido["minuto_llegada"])
-            tiempo_esperando = max(0, tiempo_esperando)
-            
+            tiempo_esperando = max(0, minuto_actual_reloj - max(paciente_atendido["minuto_citado"], paciente_atendido["minuto_llegada"]))
             if tiempo_esperando > max_retraso_dia:
                 max_retraso_dia = tiempo_esperando
                 
             if tiempo_esperando < 5: 
-                slots_status[slot_actual] = 1 # A tiempo (tolerancia < 5 min)
+                slots_status[slot_actual] = 1 
             else:
-                slots_status[slot_actual] = 2 # Retrasado
+                slots_status[slot_actual] = 2 
                 
             atendidos += 1
         else:
-            # Si la sala está vacía
             if len(agenda[slot_actual]) > 0:
-                slots_status[slot_actual] = 0 # No-show absoluto o viene hiper tarde
+                slots_status[slot_actual] = 0 
             else:
-                slots_status[slot_actual] = 3 # Hueco vacío de agenda
+                slots_status[slot_actual] = 3 
 
     return slots_status, atendidos, solapamientos, max_retraso_dia
 
-def simulate_month(df, overbooking_mode=False, umbral_riesgo=0.40):
+def simulate_month(df, overbooking_mode=False, umbral_riesgo=0.40, descanso_fijo=False):
     month_matrix = np.zeros((DAYS_IN_MONTH, TOTAL_SLOTS), dtype=int)
     stats = {"atendidos": 0, "solapamientos": 0, "overbookings": 0, "huecos_vacios": 0, "max_retraso_mes": 0}
 
     for day in range(DAYS_IN_MONTH):
         pool = get_day_patients_pool(df, day, num_needed=60)
         agenda, overbookings_dia = create_schedule(pool, smart_overbooking=overbooking_mode, umbral_riesgo=umbral_riesgo)
-        day_matrix, atendidos_dia, solapamientos_dia, max_retraso_dia = simulate_day_discrete_events(agenda)
+        day_matrix, atendidos_dia, solapamientos_dia, max_retraso_dia = simulate_day_discrete_events(agenda, descanso_fijo=descanso_fijo)
         
         month_matrix[day] = day_matrix
         stats["atendidos"] += atendidos_dia
         stats["solapamientos"] += solapamientos_dia
         stats["overbookings"] += overbookings_dia
-        stats["huecos_vacios"] += int(np.sum((day_matrix == 0) | (day_matrix == 3)))
+        stats["huecos_vacios"] += int(np.sum((day_matrix[:30] == 0) | (day_matrix[:30] == 3)))
         
         if max_retraso_dia > stats["max_retraso_mes"]:
             stats["max_retraso_mes"] = max_retraso_dia
@@ -215,14 +233,15 @@ def format_plot(ax, title):
         plt.Line2D([0], [0], marker='s', color='w', markerfacecolor="#2ecc71", markersize=12),
         plt.Line2D([0], [0], marker='s', color='w', markerfacecolor="#f39c12", markersize=12),
         plt.Line2D([0], [0], marker='s', color='w', markerfacecolor="#3498db", markersize=12),
+        plt.Line2D([0], [0], marker='s', color='w', markerfacecolor="#9b59b6", markersize=12),
     ]
-    legend_labels = ["No-show/Vacío", "A tiempo", "Retrasado", "Descanso Flexible"]
+    legend_labels = ["No-show/Vacío", "A tiempo", "Retrasado (Fricción)", "Descanso", "Horas de Informes"]
     ax.legend(legend_handles, legend_labels, loc="upper right")
 
 def save_matrix_plot(matrix, title, path):
-    cmap = plt.matplotlib.colors.ListedColormap(["#d3d3d3", "#2ecc71", "#f39c12", "#ffffff", "#3498db"])
+    cmap = plt.matplotlib.colors.ListedColormap(["#d3d3d3", "#2ecc71", "#f39c12", "#ffffff", "#3498db", "#9b59b6"])
     fig, ax = plt.subplots(figsize=(16, 7))
-    ax.imshow(matrix, cmap=cmap, vmin=0, vmax=4, aspect="auto")
+    ax.imshow(matrix, cmap=cmap, vmin=0, vmax=5, aspect="auto")
     format_plot(ax, title)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -230,14 +249,14 @@ def save_matrix_plot(matrix, title, path):
 
 def save_matrix_gif(matrix, title, path):
     frames = []
-    cmap = plt.matplotlib.colors.ListedColormap(["#d3d3d3", "#2ecc71", "#f39c12", "#ffffff", "#3498db"])
+    cmap = plt.matplotlib.colors.ListedColormap(["#d3d3d3", "#2ecc71", "#f39c12", "#ffffff", "#3498db", "#9b59b6"])
     print(f"🎬 Renderizando GIF para {path.name}...")
     for day in range(1, DAYS_IN_MONTH + 1):
         temp_matrix = matrix.copy()
         if day < DAYS_IN_MONTH:
             temp_matrix[day:] = 3
         fig, ax = plt.subplots(figsize=(16, 7))
-        ax.imshow(temp_matrix, cmap=cmap, vmin=0, vmax=4, aspect="auto")
+        ax.imshow(temp_matrix, cmap=cmap, vmin=0, vmax=5, aspect="auto")
         format_plot(ax, f"{title} (Día {day})")
         fig.tight_layout()
         buf = io.BytesIO()
@@ -251,50 +270,73 @@ def save_matrix_gif(matrix, title, path):
 def main():
     df = prepare_dataset_and_model()
 
-    print("--- EVALUANDO ESCENARIO TRADICIONAL (MUNDO REAL SIN IA) ---")
-    matrix_trad, stats_trad = simulate_month(df, overbooking_mode=False)
-    print(f"📊 Tradicional -> Atendidos: {stats_trad['atendidos']} | Peor Retraso: {stats_trad['max_retraso_mes']:.1f} min")
+    print("--- 1. ESCENARIO REAL (Descanso Fijo a las 11:30, sin IA) ---")
+    matrix_trad_fijo, stats_trad_fijo = simulate_month(df, overbooking_mode=False, descanso_fijo=True)
+    print(f"📊 Tradicional Fijo -> Atendidos: {stats_trad_fijo['atendidos']} | Peor Retraso: {stats_trad_fijo['max_retraso_mes']:.1f} min")
+    
+    print("\n--- 2. ESCENARIO MEJORA OPERATIVA (Descanso Flexible, sin IA) ---")
+    matrix_trad_flex, stats_trad_flex = simulate_month(df, overbooking_mode=False, descanso_fijo=False)
+    print(f"📊 Tradicional Flex -> Atendidos: {stats_trad_flex['atendidos']} | Peor Retraso: {stats_trad_flex['max_retraso_mes']:.1f} min")
     print("-" * 75)
 
     umbrales_a_probar = [0.30, 0.40, 0.45, 0.50, 0.60]
-    mejor_umbral, max_score, mejor_matrix, mejor_stats = None, -float('inf'), None, None
+    resultados_ia = {}
 
-    print("🔬 PROBANDO IA CON EVENTOS DISCRETOS Y JOHNSON S_U:")
+    print("🔬 3. PROBANDO IA (Descanso Flexible + Smart Overbooking):")
     for umbral in umbrales_a_probar:
-        matrix_ia, stats_ia = simulate_month(df, overbooking_mode=True, umbral_riesgo=umbral)
-        extra = stats_ia['atendidos'] - stats_trad['atendidos']
+        # La IA siempre opera con descanso flexible (descanso_fijo=False)
+        matrix_ia, stats_ia = simulate_month(df, overbooking_mode=True, umbral_riesgo=umbral, descanso_fijo=False)
         
-        # Penalización severa para retrasos inaceptables
-        penalizacion_tiempo = 0
-        if stats_ia['max_retraso_mes'] > 45:
-            penalizacion_tiempo = (stats_ia['max_retraso_mes'] - 45) * 3
+        # Comparamos la ganancia contra el modelo real (Tradicional Fijo)
+        extra = stats_ia['atendidos'] - stats_trad_fijo['atendidos']
+        
+        resultados_ia[umbral] = {
+            'matrix': matrix_ia,
+            'stats': stats_ia,
+            'extra': extra
+        }
+        
+        print(f"   🎯 IA Umbral > {umbral:.2f} | Atendidos: {stats_ia['atendidos']} (+{extra} vs Fijo) | Peor Retraso: {stats_ia['max_retraso_mes']:.1f} min")
 
-        score = (extra * 2.0) - (stats_ia['solapamientos'] * 0.5) - penalizacion_tiempo
-        print(f"   🎯 Umbral > {umbral:.2f} | Atendidos: {stats_ia['atendidos']} (+{extra}) | Solapamientos: {stats_ia['solapamientos']} | Peor Retraso: {stats_ia['max_retraso_mes']:.1f} min | Score: {score:.1f}")
+    print("-" * 75)
+    
+    mejor_umbral = None
+    while True:
+        try:
+            seleccion = input("⌨️  Como gerente, teclea el umbral que deseas aplicar (ej. 0.40): ")
+            seleccion_float = float(seleccion)
+            
+            if seleccion_float in resultados_ia:
+                mejor_umbral = seleccion_float
+                mejor_matrix = resultados_ia[mejor_umbral]['matrix']
+                mejor_stats = resultados_ia[mejor_umbral]['stats']
+                break
+            else:
+                print(f"❌ El umbral {seleccion_float} no está en la lista. Inténtalo de nuevo.")
+        except ValueError:
+            print("❌ Número no válido.")
 
-        if score > max_score:
-            max_score = score
-            mejor_umbral = umbral
-            mejor_matrix = matrix_ia
-            mejor_stats = stats_ia
+    incremento_pacientes = mejor_stats['atendidos'] - stats_trad_fijo['atendidos']
+    porcentaje_mejora = (incremento_pacientes / stats_trad_fijo['atendidos']) * 100
 
-    incremento_pacientes = mejor_stats['atendidos'] - stats_trad['atendidos']
-    porcentaje_mejora = (incremento_pacientes / stats_trad['atendidos']) * 100
-
-    print("=" * 75)
-    print(f"🏆 CONCLUSIÓN ÓPTIMA: Umbral Recomendado > {mejor_umbral}")
+    print("\n" + "=" * 75)
+    print(f"🏆 HAS SELECCIONADO EL UMBRAL: {mejor_umbral}")
     if porcentaje_mejora > 0:
-        print(f"💰 IMPACTO DE NEGOCIO: Aumento del {porcentaje_mejora:.1f}% (+{incremento_pacientes} pacientes)")
-        print(f"⏱️ COMPROMISO DE CALIDAD: El peor retraso del mes fue de {mejor_stats['max_retraso_mes']:.1f} minutos, habiendo absorbido el caos humano (llegadas tempranas y tardías).")
+        print(f"💰 IMPACTO TOTAL (Procesos + IA): Aumento del {porcentaje_mejora:.1f}% (+{incremento_pacientes} pacientes/mes)")
+        print(f"⏱️ COMPROMISO DE CALIDAD: El peor retraso será de {mejor_stats['max_retraso_mes']:.1f} min.")
     print("=" * 75)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    save_matrix_plot(matrix_trad, "Agenda Tradicional (Caos Real)", OUTPUT_DIR / "mc_4_tradicional.png")
-    save_matrix_plot(mejor_matrix, f"Agenda Inteligente (Absorción de Caos)", OUTPUT_DIR / "mc_4_inteligente.png")
-    save_matrix_gif(matrix_trad, "Evolución Tradicional", OUTPUT_DIR / "mc_4_animacion_trad.gif")
-    save_matrix_gif(mejor_matrix, "Evolución Inteligente", OUTPUT_DIR / "mc_4_animacion_ia.gif")
+    # Guardamos imágenes de los 3 modelos
+    save_matrix_plot(matrix_trad_fijo, "1. Tradicional (Descanso Fijo)", OUTPUT_DIR / "mc_4_1_tradicional_fijo.png")
+    save_matrix_plot(matrix_trad_flex, "2. Tradicional (Descanso Flexible)", OUTPUT_DIR / "mc_4_2_tradicional_flex.png")
+    save_matrix_plot(mejor_matrix, f"3. IA Smart Slotting (Umbral {mejor_umbral})", OUTPUT_DIR / "mc_4_3_inteligente.png")
     
-    print(f"\n✅ Simulación completada. Renderizados guardados en 'scripts'.")
+    # Animaciones
+    save_matrix_gif(matrix_trad_fijo, "1. Evolución Tradicional Fijo", OUTPUT_DIR / "mc_4_animacion_1_fijo.gif")
+    save_matrix_gif(mejor_matrix, f"3. Evolución IA (Umbral {mejor_umbral})", OUTPUT_DIR / "mc_4_animacion_3_ia.gif")
+    
+    print(f"\n✅ ¡Decisión aplicada! Gráficos guardados en 'scripts'.")
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ Hospital Date Manager is a prototype for hospital appointment optimization. It c
 The project includes:
 
 - A FastAPI smart-slotting demo in `src/api_2.py`.
+- A Streamlit dashboard in `scripts/app.py` for interactive scheduling and smart overbooking simulation.
 - A Streamlit chatbot UI in `chatbot/app.py` for conversational patient intake, clinical history upload, and export.
 - LLM provider adapters for local Ollama and remote Gemini.
 - Export tooling for JSON and CSV conversation exports, plus full data exports with patient state and clinical history.
@@ -30,6 +31,7 @@ The current booking rule in `src/api_2.py` uses the following criteria for a sec
 | Path                                      | Purpose                                                                                           |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `README.md`                               | Unified documentation for the repository.                                                         |
+| `scripts/app.py`                          | Streamlit dashboard for interactive scheduling and smart overbooking simulation.                  |
 | `chatbot/app.py`                          | Streamlit chatbot UI with conversational intake, clinical history workflows, and export controls. |
 | `chatbot/.env.example`                    | Example environment file with local Ollama and Gemini settings.                                   |
 | `chatbot/requirements.txt`                | Chatbot-specific Python dependencies.                                                             |
@@ -67,13 +69,26 @@ pip install -r requirements.txt
 pip install -r chatbot/requirements.txt
 ```
 
-## Running the Chatbot App
+## Running the Streamlit Dashboard
 
-Start the Streamlit chatbot UI from the `chatbot` folder:
+From the project root, start the interactive dashboard with:
 
 ```bash
-cd chatbot
-streamlit run app.py
+streamlit run scripts/app.py
+```
+
+Then open:
+
+```text
+http://localhost:8501
+```
+
+## Running the Chatbot App
+
+Start the Streamlit chatbot UI from the project root:
+
+```bash
+streamlit run chatbot/app.py
 ```
 
 Then open:
