@@ -45,7 +45,8 @@ The current booking rule in `src/api_2.py` uses the following criteria for a sec
 | `scripts/mc_2.py`                         | Monte Carlo simulation with isotonic probability calibration in memory.                           |
 | `data/dataset_limpio.csv`                 | Clean dataset used by the simulation scripts.                                                     |
 | `models/modelo_campeon.json`              | XGBoost model artifact loaded by `src/api_2.py` when available.                                   |
-| `models/mejor_modelo_xgb.joblib`          | Alternative serialized model artifact.                                                            |
+| `models/modelo_definitivo.joblib`         | Joblib model loaded by `scripts/app.py` for the interactive dashboard.                            |
+| `models/voting_clf.joblib`               | Alternative serialized model artifact.                                                            |
 | `models/calibrated_isotonic_model.joblib` | Serialized calibration artifact for model evaluation workflows.                                   |
 
 ## Setup
@@ -69,9 +70,24 @@ pip install -r requirements.txt
 pip install -r chatbot/requirements.txt
 ```
 
-## Running the Streamlit Dashboard
+## Streamlit Dashboard: `scripts/app.py`
 
-From the project root, start the interactive dashboard with:
+The file `scripts/app.py` contains the interactive Hospital Smart Slotting dashboard. It is separate from the conversational chatbot in `chatbot/app.py` and includes:
+
+- Three operating scenarios: fixed traditional scheduling, flexible traditional scheduling, and AI-assisted overbooking.
+- A configurable number of patients and simulation days.
+- Appointment slots, scheduled breaks, end-of-shift administrative time, and patient no-show outcomes.
+- A planned-agenda view and a real-attendance view.
+- Animated monthly heatmaps showing empty slots, attendance, delays, breaks, reports, and early arrivals.
+- Risk, arrival-time, waiting-room, probability-density, cumulative-probability, and ROI charts.
+- The real no-show label from `data/dataset_limpio.csv` and predictions from `models/modelo_definitivo.joblib`.
+
+The dashboard expects these project files to exist:
+
+- `data/dataset_limpio.csv`
+- `models/modelo_definitivo.joblib`
+
+Run it from the project root (the folder containing `README.md`):
 
 ```bash
 streamlit run scripts/app.py
@@ -82,6 +98,14 @@ Then open:
 ```text
 http://localhost:8501
 ```
+
+If the virtual environment is being used on Windows, run Streamlit explicitly through it:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run scripts/app.py
+```
+
+The dashboard loads the joblib model when it starts, so `catboost` must be installed even though it is not imported directly in `scripts/app.py`: the serialized model contains a CatBoost component.
 
 ## Running the Chatbot App
 
