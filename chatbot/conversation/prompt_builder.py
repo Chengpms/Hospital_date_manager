@@ -7,8 +7,8 @@ import json
 import logging
 from typing import List, Dict
 
-from .patient_state import PatientState
-from .history_manager import HistoryManager
+from chatbot.conversation.patient_state import PatientState
+from chatbot.conversation.history_manager import HistoryManager
 
 logger = logging.getLogger(__name__)
 

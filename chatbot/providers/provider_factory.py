@@ -4,11 +4,11 @@ Implementa el patrón Factory.
 """
 
 import logging
-from .base_provider import BaseProvider
-from .ollama_provider import OllamaProvider
-from .gemini_provider import GeminiProvider
-from .openai_provider import OpenAIProvider
-from ..config import LLM_CONFIG
+from chatbot.providers.base_provider import BaseProvider
+from chatbot.providers.ollama_provider import OllamaProvider
+from chatbot.providers.gemini_provider import GeminiProvider
+from chatbot.providers.openai_provider import OpenAIProvider
+from chatbot.config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 

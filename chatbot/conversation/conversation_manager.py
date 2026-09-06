@@ -5,11 +5,11 @@ Implementa el patrón Facade para interactuar con UI y Predictor[cite: 2, 4].
 
 import logging
 from typing import Tuple, Dict, Any
-from ..providers.base_provider import BaseProvider
-from .patient_state import PatientState
-from .history_manager import HistoryManager
-from .prompt_builder import PromptBuilder
-from .extractor import Extractor
+from chatbot.providers.base_provider import BaseProvider
+from chatbot.conversation.patient_state import PatientState
+from chatbot.conversation.history_manager import HistoryManager
+from chatbot.conversation.prompt_builder import PromptBuilder
+from chatbot.conversation.extractor import Extractor
 
 logger = logging.getLogger(__name__)
 

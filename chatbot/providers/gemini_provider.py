@@ -8,8 +8,8 @@ from google import genai
 from google.genai import types
 from typing import List, Dict, Any
 
-from .base_provider import BaseProvider
-from ..config import LLM_CONFIG
+from chatbot.providers.base_provider import BaseProvider
+from chatbot.config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 

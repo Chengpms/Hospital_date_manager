@@ -10,10 +10,10 @@ from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
 
-from .config import LLM_CONFIG, APP_CONFIG, PREDICT_CONFIG
-from .providers.provider_factory import ProviderFactory
-from .conversation.conversation_manager import ConversationManager
-from .prediction.predictor import Predictor
+from chatbot.config import LLM_CONFIG, APP_CONFIG, PREDICT_CONFIG
+from chatbot.providers.provider_factory import ProviderFactory
+from chatbot.conversation.conversation_manager import ConversationManager
+from chatbot.prediction.predictor import Predictor
 
 # --- BYPASS HACKATHON: Comentamos esto porque falta el archivo en Git ---
 # from exports import (

@@ -6,8 +6,8 @@ Este proveedor intenta crear respuestas en formato JSON y limpiar code fences.
 import logging
 from typing import List, Dict, Any
 
-from .base_provider import BaseProvider
-from ..config import LLM_CONFIG
+from chatbot.providers.base_provider import BaseProvider
+from chatbot.config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 
