@@ -74,6 +74,7 @@ class OllamaProvider(BaseProvider):
         }
 
         try:
+            self.last_model_used = self.model
             logger.debug(f"Enviando petición a Ollama en {self.base_url}")
             # Se aplica el timeout dinámico configurado[cite: 1]
             response = requests.post(self.base_url, json=payload, timeout=self.timeout)
@@ -81,7 +82,12 @@ class OllamaProvider(BaseProvider):
             
             data = response.json()
             raw_content = data.get("message", {}).get("content", "")
-            
+
+            try:
+                self.last_call_meta = {"status_code": response.status_code, "model": self.model}
+            except Exception:
+                self.last_call_meta = {"model": self.model}
+
             return self._clean_json_response(raw_content)
             
         except requests.exceptions.Timeout as e:

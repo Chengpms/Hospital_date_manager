@@ -59,6 +59,7 @@ class GeminiProvider(BaseProvider):
         Envía la petición a Gemini y reintenta con modelos alternativos si el modelo configurado no está disponible.
         """
         try:
+            self.last_model_used = self.model_name
             logger.debug("Enviando petición a Gemini API")
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -66,6 +67,11 @@ class GeminiProvider(BaseProvider):
                 config=self.generation_config,
             )
             text = response.text if hasattr(response, "text") else str(response)
+            # record metadata for UI
+            try:
+                self.last_call_meta = {"model": self.model_name}
+            except Exception:
+                self.last_call_meta = {"model": self.model_name}
             return self._clean_json_response(text)
         except Exception as e:
             # Log original error
@@ -104,6 +110,12 @@ class GeminiProvider(BaseProvider):
                         config=self.generation_config,
                     )
                     text2 = response2.text if hasattr(response2, "text") else str(response2)
+                    # record metadata for UI
+                    try:
+                        self.last_model_used = candidate
+                        self.last_call_meta = {"model": candidate}
+                    except Exception:
+                        pass
                     return self._clean_json_response(text2)
                 except Exception as e2:
                     logger.debug(f"Fallback model {candidate} failed: {e2}")

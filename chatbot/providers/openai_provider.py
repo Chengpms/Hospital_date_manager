@@ -32,13 +32,36 @@ class OpenAIProvider(BaseProvider):
             chat_messages.append({'role': role, 'content': m.get('content')})
 
         try:
+            # metadata for UI/debug
+            self.last_model_used = self.model
+
             resp = self.openai.ChatCompletion.create(
                 model=self.model,
                 messages=chat_messages,
                 temperature=LLM_CONFIG.temperature,
                 max_tokens=LLM_CONFIG.max_tokens,
             )
-            text = resp.choices[0].message.content
+            # Try to extract text safely from different resp shapes
+            try:
+                text = resp.choices[0].message.content
+            except Exception:
+                text = getattr(resp.choices[0].message, 'content', str(resp)) if hasattr(resp, 'choices') else str(resp)
+
+            # collect available metadata (usage, id)
+            meta = {}
+            try:
+                meta['id'] = getattr(resp, 'id', None) or (resp.get('id') if isinstance(resp, dict) else None)
+            except Exception:
+                pass
+            try:
+                # some SDKs return a dict-like usage
+                usage = getattr(resp, 'usage', None) or (resp.get('usage') if isinstance(resp, dict) else None)
+                if usage:
+                    meta['usage'] = usage
+            except Exception:
+                pass
+
+            self.last_call_meta = meta
             return self._clean_json_response(text)
         except Exception as e:
             logger.exception('Error llamando a OpenAI API')

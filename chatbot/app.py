@@ -426,14 +426,43 @@ def main() -> None:
                     manager = None
 
                 status_ph = st.empty()
+                # show provider/model prior to calling the LLM (real-time visibility)
+                try:
+                    provider_info = manager.get_provider_info() if manager is not None else {}
+                except Exception:
+                    provider_info = {}
+
                 if manager is not None:
                     try:
-                        status_ph.info('Enviando al proveedor y generando respuesta...')
+                        prov_name = provider_info.get('provider') if provider_info else type(manager.provider).__name__
+                        prov_model = provider_info.get('model') if provider_info else getattr(manager.provider, 'model', getattr(manager.provider, 'model_name', None))
+                        status_ph.info(f"Enviando al proveedor {prov_name} (modelo: {prov_model}) y generando respuesta...")
                         with st.spinner('LLM generando respuesta...'):
                             reply, ready = manager.process_user_input(user_text)
+
+                        # append assistant reply to UI
                         st.session_state.messages_ui.append({'role':'assistant','content':reply})
+
+                        # after the call, fetch provider metadata if available
+                        try:
+                            updated_info = manager.get_provider_info()
+                        except Exception:
+                            updated_info = provider_info
+
+                        # show a small summary of provider/model/metadata
+                        with st.expander('Detalles del proveedor y llamada (última)'):
+                            st.write(f"Proveedor: {updated_info.get('provider')}")
+                            st.write(f"Modelo: {updated_info.get('model')}")
+                            meta = updated_info.get('meta')
+                            if meta:
+                                st.write('Metadatos:')
+                                st.json(meta)
+                            else:
+                                st.write('Sin metadatos disponibles')
+
                         status_ph.success('Respuesta recibida')
-                        # clear text area
+
+                        # clear text area and rerun to refresh UI
                         st.session_state['message_input'] = ''
                         st.experimental_rerun()
                     except Exception as e:

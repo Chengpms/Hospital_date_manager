@@ -70,6 +70,16 @@ class ConversationManager:
             logger.error(error_msg, exc_info=True)
             return "Lo siento, ha ocurrido un error técnico interno procesando su solicitud.", False
 
+    def get_provider_info(self) -> Dict[str, Any]:
+        """Devuelve metadata simple del proveedor y modelo usados en la última llamada.
+        Esto permite a la interfaz mostrar en tiempo real qué proveedor y modelo se emplearon.
+        """
+        info = {"provider": type(self.provider).__name__}
+        last_model = getattr(self.provider, "last_model_used", None) or getattr(self.provider, "model", None) or getattr(self.provider, "model_name", None)
+        last_meta = getattr(self.provider, "last_call_meta", None)
+        info.update({"model": last_model, "meta": last_meta})
+        return info
+
     def get_current_state(self) -> Dict[str, Any]:
         """Devuelve un volcado del estado actual para la interfaz o el predictor."""
         return self.state.model_dump()
