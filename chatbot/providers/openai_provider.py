@@ -43,3 +43,22 @@ class OpenAIProvider(BaseProvider):
         except Exception as e:
             logger.exception('Error llamando a OpenAI API')
             raise RuntimeError(str(e)) from e
+
+    def list_models(self) -> list:
+        """Lista modelos disponibles en OpenAI a través de la librería oficial.
+        Devuelve lista de model ids o [] en caso de error."""
+        try:
+            resp = self.openai.Model.list()
+            models = []
+            for m in getattr(resp, 'data', []) or resp:
+                # resp.data es lo común; cada m puede ser dict o Model object
+                if isinstance(m, dict):
+                    models.append(m.get('id') or m.get('model') or str(m))
+                else:
+                    # intentar atributos
+                    mid = getattr(m, 'id', None) or getattr(m, 'model', None)
+                    models.append(mid or str(m))
+            return models
+        except Exception as e:
+            logger.debug(f"OpenAI list_models error: {e}")
+            return []

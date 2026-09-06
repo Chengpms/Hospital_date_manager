@@ -78,3 +78,22 @@ class GeminiProvider(BaseProvider):
             error_msg = f"Error en la comunicación con Gemini API: {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg) from e
+
+    def list_models(self) -> list:
+        """Intenta listar los modelos disponibles usando el cliente genai.
+        Devuelve lista de ids de modelos o [] en fallo."""
+        try:
+            # Intentar llamadas comunes de la SDK
+            if hasattr(self.client, 'list_models'):
+                resp = self.client.list_models()
+                models = [getattr(m, 'name', None) or getattr(m, 'model', None) or str(m) for m in resp]
+                return models
+            elif hasattr(self.client, 'models') and hasattr(self.client.models, 'list'):
+                resp = self.client.models.list()
+                models = [getattr(m, 'name', None) or getattr(m, 'model', None) or str(m) for m in getattr(resp, 'data', []) or resp]
+                return models
+            else:
+                return []
+        except Exception as e:
+            logger.debug(f"Gemini list_models error: {e}")
+            return []

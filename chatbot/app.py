@@ -124,14 +124,38 @@ def render_sidebar() -> None:
                 if manual_base_url:
                     setattr(LLM_CONFIG, 'ollama_base_url', manual_base_url)
                     setattr(LLM_CONFIG, 'openai_base_url', manual_base_url)
-                if manual_model:
-                    LLM_CONFIG.default_model = manual_model
-                    LLM_CONFIG.gemini_model = manual_model
-                    LLM_CONFIG.openai_model = manual_model
                 LLM_CONFIG.request_timeout = int(manual_timeout)
+
+                # After applying creds, attempt to discover models automatically
+                try:
+                    provider = ProviderFactory.get_provider()
+                    models = provider.list_models()
+                    if models:
+                        selected = st.selectbox("Modelos detectados", models, index=0)
+                        LLM_CONFIG.default_model = selected
+                        # provider-specific
+                        if LLM_CONFIG.default_provider == 'gemini':
+                            LLM_CONFIG.gemini_model = selected
+                        if LLM_CONFIG.default_provider == 'openai':
+                            LLM_CONFIG.openai_model = selected
+                        st.success(f"Modelos detectados y seleccionado: {selected}")
+                    else:
+                        if manual_model:
+                            LLM_CONFIG.default_model = manual_model
+                            LLM_CONFIG.gemini_model = manual_model
+                            LLM_CONFIG.openai_model = manual_model
+                            st.warning("No se pudieron listar modelos automáticamente; se aplica el modelo que pegaste.")
+                        else:
+                            st.warning("No se encontraron modelos automáticamente. Introduce el nombre manualmente.")
+                except Exception as e:
+                    st.error(f"No se pudo inicializar el proveedor para listar modelos: {e}")
+                    if manual_model:
+                        LLM_CONFIG.default_model = manual_model
+                        LLM_CONFIG.gemini_model = manual_model
+                        LLM_CONFIG.openai_model = manual_model
+
                 if "manager" in st.session_state:
                     del st.session_state["manager"]
-                st.success("Credenciales aplicadas. Reiniciando sesión...")
                 st.rerun()
 
         st.divider()

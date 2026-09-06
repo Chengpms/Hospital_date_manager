@@ -19,11 +19,35 @@ class OllamaProvider(BaseProvider):
 
     def __init__(self) -> None:
         """Inicializa el proveedor utilizando la configuración central."""
-        self.base_url = f"{LLM_CONFIG.ollama_base_url}/api/chat"
+        self.base_url = f"{LLM_CONFIG.ollama_base_url.rstrip('/')}/api/chat"
+        self.root_url = LLM_CONFIG.ollama_base_url.rstrip('/')
         self.model = LLM_CONFIG.default_model
         self.temperature = LLM_CONFIG.temperature
         self.timeout = LLM_CONFIG.request_timeout
         logger.info(f"OllamaProvider inicializado (Modelo: {self.model}, Timeout: {self.timeout}s)")
+
+    def list_models(self) -> list:
+        """Intenta obtener la lista de modelos disponibles desde la API de Ollama.
+        Devuelve una lista de nombres de modelos o lista vacía en caso de error."""
+        try:
+            resp = requests.get(f"{self.root_url}/models", timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            # La API de Ollama devuelve una lista de objetos con 'model' o 'name'
+            models = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        models.append(item.get('model') or item.get('name') or str(item))
+                    else:
+                        models.append(str(item))
+            else:
+                # Fallback: intentar extraer keys
+                models = [str(data)]
+            return models
+        except Exception as e:
+            logger.debug(f"Ollama list_models error: {e}")
+            return []
 
     def generate_response(self, messages: List[Dict[str, str]]) -> str:
         """
