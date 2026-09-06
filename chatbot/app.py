@@ -283,6 +283,79 @@ def main() -> None:
                         st.success(f"Credenciales y modelo guardados en {env_path}")
                     except Exception as e:
                         st.error(f"No se pudo guardar .env: {e}")
+
+                # Encrypted save (optional)
+                try:
+                    from chatbot.utils.crypto import HAS_CRYPTO, encrypt_dict, decrypt_file
+                except Exception:
+                    HAS_CRYPTO = False
+                else:
+                    # expose encryption UI
+                    if HAS_CRYPTO:
+                        with st.expander("🔐 Guardar encriptado (.env.enc)"):
+                            passphrase = st.text_input("Passphrase para encriptar (no se guarda)", type="password", key="enc_pass")
+                            passphrase2 = st.text_input("Confirmar passphrase", type="password", key="enc_pass2")
+                            if st.button("🔐 Encriptar y guardar .env.enc"):
+                                if not passphrase or passphrase != passphrase2:
+                                    st.error("Las passphrases no coinciden o están vacías.")
+                                else:
+                                    data = {}
+                                    if api_key:
+                                        data['GEMINI_API_KEY'] = api_key
+                                        data['OPENAI_API_KEY'] = api_key
+                                    if base_url:
+                                        data['OLLAMA_BASE_URL'] = base_url
+                                    if LLM_CONFIG.default_model:
+                                        data['DEFAULT_MODEL'] = LLM_CONFIG.default_model
+                                    try:
+                                        enc = encrypt_dict(passphrase, data)
+                                        env_enc_path = Path(__file__).resolve().parent / '.env.enc'
+                                        env_enc_path.write_text(json.dumps(enc, ensure_ascii=False), encoding='utf-8')
+                                        try:
+                                            import os
+                                            os.chmod(env_enc_path, 0o600)
+                                        except Exception:
+                                            pass
+                                        st.success(f"Encrypted credentials saved to {env_enc_path}")
+                                    except Exception as e:
+                                        st.error(f"Encryption failed: {e}")
+                    else:
+                        st.info("Para encriptar las credenciales instala 'cryptography' en el entorno (pip install cryptography)")
+
+                # Decrypt/load existing .env.enc
+                try:
+                    from chatbot.utils.crypto import HAS_CRYPTO, decrypt_file
+                except Exception:
+                    HAS_CRYPTO = False
+                else:
+                    if HAS_CRYPTO:
+                        enc_path = Path(__file__).resolve().parent / '.env.enc'
+                        if enc_path.exists():
+                            with st.expander("🔓 Cargar credenciales encriptadas"):
+                                dec_pass = st.text_input("Passphrase para desencriptar", type="password", key="dec_pass")
+                                if st.button("🔓 Cargar .env.enc"):
+                                    try:
+                                        data = decrypt_file(dec_pass, str(enc_path))
+                                        # apply to LLM_CONFIG
+                                        if 'GEMINI_API_KEY' in data:
+                                            LLM_CONFIG.gemini_api_key = data.get('GEMINI_API_KEY')
+                                            LLM_CONFIG.openai_api_key = data.get('GEMINI_API_KEY')
+                                        if 'OPENAI_API_KEY' in data:
+                                            LLM_CONFIG.openai_api_key = data.get('OPENAI_API_KEY')
+                                        if 'OLLAMA_BASE_URL' in data:
+                                            LLM_CONFIG.ollama_base_url = data.get('OLLAMA_BASE_URL')
+                                        if 'DEFAULT_MODEL' in data:
+                                            LLM_CONFIG.default_model = data.get('DEFAULT_MODEL')
+                                        if 'GEMINI_API_KEY' in data or 'OPENAI_API_KEY' in data:
+                                            # reset manager to pick up new creds
+                                            if 'manager' in st.session_state:
+                                                del st.session_state['manager']
+                                        st.success('Encrypted credentials loaded into session configuration')
+                                        st.experimental_rerun()
+                                    except Exception as e:
+                                        st.error(f"Decryption failed: {e}")
+                    else:
+                        st.info("Para cargar .env.enc instala 'cryptography' en el entorno (pip install cryptography)")
             else:
                 st.warning("No se encontraron modelos automáticamente. Introduce un nombre manualmente y aplica.")
         except Exception as e:
