@@ -84,8 +84,8 @@ def render_sidebar() -> None:
 
         provider_choice = st.selectbox(
             "Proveedor LLM",
-            options=["Ollama", "Gemini"],
-            index=0 if LLM_CONFIG.default_provider == "ollama" else 1
+            options=["Ollama", "Gemini", "OpenAI"],
+            index=0 if LLM_CONFIG.default_provider == "ollama" else (1 if LLM_CONFIG.default_provider == "gemini" else 2)
         )
         new_provider = provider_choice.lower()
         if new_provider != LLM_CONFIG.default_provider:
@@ -96,14 +96,44 @@ def render_sidebar() -> None:
 
         LLM_CONFIG.temperature = st.slider(
             "Temperatura (Creatividad vs Precisión)",
-            min_value=0.0, max_value=1.0, value=0.0, step=0.1,
+            min_value=0.0, max_value=1.0, value=LLM_CONFIG.temperature, step=0.1,
             help="Mantenlo en 0.0 para maximizar la consistencia del JSON."
         )
         
         LLM_CONFIG.max_tokens = st.number_input(
-            "Max Tokens", min_value=256, max_value=4096, value=1500, step=256
+            "Max Tokens", min_value=64, max_value=4096, value=LLM_CONFIG.max_tokens, step=64
         )
         
+        st.divider()
+
+        # Manual API credentials UI
+        st.subheader("🔑 Configuración manual de API")
+        use_manual = st.checkbox("Usar credenciales manuales (pegar clave/endpoint)")
+        if use_manual:
+            manual_provider = st.selectbox("Proveedor manual", ["Ollama","Gemini","OpenAI","Custom"], index=0)
+            manual_api_key = st.text_input("API Key (si aplica)", value="", type="password")
+            manual_base_url = st.text_input("Base URL / Endpoint (si aplica)", value="")
+            manual_model = st.text_input("Nombre de Modelo (ej. gpt-4o-mini)", value="")
+            manual_timeout = st.number_input("Timeout (segundos)", min_value=5, max_value=600, value=LLM_CONFIG.request_timeout)
+            if st.button("Aplicar credenciales manuales"):
+                LLM_CONFIG.default_provider = manual_provider.lower()
+                if manual_api_key:
+                    # try to set most common keys
+                    setattr(LLM_CONFIG, 'gemini_api_key', manual_api_key)
+                    setattr(LLM_CONFIG, 'openai_api_key', manual_api_key)
+                if manual_base_url:
+                    setattr(LLM_CONFIG, 'ollama_base_url', manual_base_url)
+                    setattr(LLM_CONFIG, 'openai_base_url', manual_base_url)
+                if manual_model:
+                    LLM_CONFIG.default_model = manual_model
+                    LLM_CONFIG.gemini_model = manual_model
+                    LLM_CONFIG.openai_model = manual_model
+                LLM_CONFIG.request_timeout = int(manual_timeout)
+                if "manager" in st.session_state:
+                    del st.session_state["manager"]
+                st.success("Credenciales aplicadas. Reiniciando sesión...")
+                st.rerun()
+
         st.divider()
         if st.button("🔄 Nueva Conversación", use_container_width=True):
             reset_conversation()

@@ -7,6 +7,7 @@ import logging
 from .base_provider import BaseProvider
 from .ollama_provider import OllamaProvider
 from .gemini_provider import GeminiProvider
+from .openai_provider import OpenAIProvider
 from ..config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class ProviderFactory:
             return OllamaProvider()
         elif provider_name == "gemini":
             return GeminiProvider()
+        elif provider_name == "openai":
+            return OpenAIProvider()
         else:
             error_msg = f"Proveedor no soportado: {provider_name}"
             logger.error(error_msg)
