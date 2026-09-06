@@ -4,11 +4,13 @@ Actúa exclusivamente como capa de presentación, delegando toda la lógica
 al ConversationManager y al Predictor.
 """
 
+import json
 import logging
-import streamlit as st
-from typing import Dict, Any
-from datetime import datetime
+import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import streamlit as st
 
 from chatbot.config import LLM_CONFIG, APP_CONFIG, PREDICT_CONFIG
 from chatbot.providers.provider_factory import ProviderFactory
@@ -24,482 +26,459 @@ from chatbot.prediction.predictor import Predictor
 # )
 # ------------------------------------------------------------------------
 
-# Configuración inicial de la página de Streamlit
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# Page config + CSS (done once, at import time, not re-injected every rerun)
+# --------------------------------------------------------------------------- #
+
 st.set_page_config(
     page_title="Asistente de Admisión Hospitalaria",
     page_icon="🏥",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS for visual polish
 st.markdown(
     """
     <style>
-    .chat-bubble-user { background:#e6f2ff; padding:10px; border-radius:10px; margin:6px 0;}
-    .chat-bubble-assistant { background:#f1f8e9; padding:10px; border-radius:10px; margin:6px 0;}
+    .chat-bubble { padding:10px; border-radius:10px; margin:8px 0; max-width:75%; }
+    .chat-user { background:#e6f2ff; margin-left:auto; }
+    .chat-assistant { background:#f1f8e9; margin-right:auto; }
+    .chat-meta { font-size:0.8em; color:#666; margin-bottom:6px; }
     .risk-badge { padding:8px 12px; border-radius:6px; color:#fff; font-weight:600; display:inline-block;}
-    .risk-high { background: #d32f2f; }
-    .risk-medium { background: #f57c00; }
-    .risk-low { background: #2e7d32; }
+    .risk-high { background:#d32f2f; }
+    .risk-medium { background:#f57c00; }
+    .risk-low { background:#2e7d32; }
     .small-note { font-size:0.9em; color:#666; }
-    .sidebar-section { margin-bottom: 12px; }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-logger = logging.getLogger(__name__)
+PROVIDERS = ["ollama", "gemini", "openai", "custom"]
 
-def initialize_session() -> None:
+
+# --------------------------------------------------------------------------- #
+# Cached / expensive-call helpers
+# --------------------------------------------------------------------------- #
+
+def _provider_cache_key() -> tuple:
+    """Fingerprint of everything that changes which provider instance is valid.
+
+    Used so we don't rebuild the provider (and its underlying client/session)
+    on every single Streamlit rerun -- only when the config actually changes.
     """
-    Inicializa los objetos principales en la sesión de Streamlit si no existen.
-    Garantiza la persistencia del estado entre recargas de la UI.
+    return (
+        LLM_CONFIG.default_provider,
+        LLM_CONFIG.default_model,
+        getattr(LLM_CONFIG, "gemini_api_key", None),
+        getattr(LLM_CONFIG, "openai_api_key", None),
+        getattr(LLM_CONFIG, "ollama_base_url", None),
+        getattr(LLM_CONFIG, "gemini_base_url", None),
+        LLM_CONFIG.temperature,
+        LLM_CONFIG.max_tokens,
+        LLM_CONFIG.request_timeout,
+    )
+
+
+def get_manager() -> Optional[ConversationManager]:
+    """Return a cached ConversationManager, rebuilding only when config changed.
+
+    Avoids re-instantiating the LLM provider client on every rerun/keystroke,
+    which is the single biggest avoidable cost in this app.
     """
-    if "manager" not in st.session_state:
-        logger.info("Inicializando nueva sesión de ConversationManager.")
+    key = _provider_cache_key()
+    if (
+        "manager" not in st.session_state
+        or st.session_state.get("_manager_key") != key
+        or not hasattr(st.session_state.manager, "process_user_input")
+    ):
         try:
             provider = ProviderFactory.get_provider()
             st.session_state.manager = ConversationManager(provider)
+            st.session_state._manager_key = key
         except Exception as e:
-            st.error(f"Error de configuración del proveedor LLM: {str(e)}")
-            st.stop()
-    else:
-        if not hasattr(st.session_state.manager, "process_clinical_history"):
-            logger.warning("Recreando ConversationManager porque falta process_clinical_history.")
-            try:
-                provider = ProviderFactory.get_provider()
-                st.session_state.manager = ConversationManager(provider)
-            except Exception as e:
-                st.error(f"Error de configuración del proveedor LLM: {str(e)}")
-                st.stop()
-            
+            st.error(f"Error de configuración del proveedor LLM: {e}")
+            return None
+    return st.session_state.manager
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def discover_models_cached(provider_name: str, api_key: str, base_url: str) -> List[str]:
+    """Cache model discovery for 5 minutes per (provider, key, url) combo.
+
+    Model lists rarely change; this avoids re-hitting the provider's API
+    every time the user touches an unrelated widget and triggers a rerun.
+    """
+    LLM_CONFIG.default_provider = provider_name
+    if api_key:
+        LLM_CONFIG.gemini_api_key = api_key
+        LLM_CONFIG.openai_api_key = api_key
+    if base_url:
+        LLM_CONFIG.gemini_base_url = base_url
+        LLM_CONFIG.ollama_base_url = base_url
+    provider_inst = ProviderFactory.get_provider()
+    return provider_inst.list_models() or []
+
+
+def get_predictor() -> Predictor:
     if "predictor" not in st.session_state:
         st.session_state.predictor = Predictor()
-        
+    return st.session_state.predictor
+
+
+# --------------------------------------------------------------------------- #
+# Session lifecycle
+# --------------------------------------------------------------------------- #
+
+def initialize_session() -> None:
+    """Initialize session_state defaults. Called once at the top of main()."""
     if "messages_ui" not in st.session_state:
         st.session_state.messages_ui = [
-            {"role": "assistant", "content": "Hola. Soy el asistente virtual del hospital. ¿En qué te puedo ayudar hoy?"}
+            {
+                "role": "assistant",
+                "content": "Hola. Soy el asistente virtual del hospital. ¿En qué te puedo ayudar hoy?",
+            }
         ]
     if "clinical_history_path" not in st.session_state:
         st.session_state.clinical_history_path = None
+    if "discovered_models" not in st.session_state:
+        st.session_state.discovered_models = []
+
+    # Ensure manager/predictor exist without forcing a rebuild if valid.
+    get_manager()
+    get_predictor()
+
 
 def reset_conversation() -> None:
     """Borra el estado actual para iniciar un nuevo flujo conversacional."""
     logger.info("Reiniciando la conversación a petición del usuario.")
-    for key in ["manager", "predictor", "messages_ui", "clinical_history_path"]:
-        if key in st.session_state:
-            del st.session_state[key]
+    for key in ("manager", "_manager_key", "predictor", "messages_ui", "clinical_history_path", "discovered_models"):
+        st.session_state.pop(key, None)
     st.rerun()
 
+
+# --------------------------------------------------------------------------- #
+# Sidebar
+# --------------------------------------------------------------------------- #
+
 def render_sidebar() -> None:
-    """
-    Renderiza el panel lateral con las configuraciones técnicas.
-    """
+    """Renderiza el panel lateral: proveedor LLM, credenciales y ayuda."""
     with st.sidebar:
         st.header("⚙️ Configuración del Sistema")
 
-        provider_choice = st.selectbox(
-            "Proveedor LLM",
-            options=["Ollama", "Gemini", "OpenAI"],
-            index=0 if LLM_CONFIG.default_provider == "ollama" else (1 if LLM_CONFIG.default_provider == "gemini" else 2)
+        provider = st.selectbox(
+            "Proveedor",
+            PROVIDERS,
+            index=PROVIDERS.index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in PROVIDERS else 0,
+            key="provider_select",
         )
-        new_provider = provider_choice.lower()
-        if new_provider != LLM_CONFIG.default_provider:
-            LLM_CONFIG.default_provider = new_provider
-            if "manager" in st.session_state:
-                del st.session_state["manager"]
-            st.rerun()
+        api_key = st.text_input(
+            "API Key (si aplica)",
+            value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "",
+            type="password",
+        )
+        base_url = st.text_input(
+            "Base URL / Endpoint (si aplica)",
+            value=getattr(LLM_CONFIG, "gemini_base_url", "") or LLM_CONFIG.ollama_base_url or "",
+        )
+        model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)
 
         LLM_CONFIG.temperature = st.slider(
             "Temperatura (Creatividad vs Precisión)",
             min_value=0.0, max_value=1.0, value=LLM_CONFIG.temperature, step=0.1,
-            help="Mantenlo en 0.0 para maximizar la consistencia del JSON."
+            help="Mantenlo en 0.0 para maximizar la consistencia del JSON.",
         )
-        
         LLM_CONFIG.max_tokens = st.number_input(
             "Max Tokens", min_value=64, max_value=4096, value=LLM_CONFIG.max_tokens, step=64
         )
-        
+
+        discover = st.button("🔎 Buscar modelos disponibles")
+        if discover:
+            try:
+                with st.spinner("Buscando modelos..."):
+                    models = discover_models_cached(provider, api_key, base_url)
+                st.session_state.discovered_models = models
+                if not models and model_hint:
+                    st.warning("No se pudieron listar modelos automáticamente; se usará el nombre indicado.")
+            except Exception as e:
+                st.error(f"Error inicializando proveedor: {e}")
+
+        # Persisted across reruns, unlike the original which vanished
+        # as soon as `discover` went back to False on the next script run.
+        if st.session_state.discovered_models:
+            chosen = st.selectbox("Modelos detectados", st.session_state.discovered_models, key="chosen_model")
+            if st.button("Usar este modelo"):
+                _apply_llm_settings(provider, api_key, base_url, chosen)
+        elif model_hint:
+            if st.button("Aplicar configuración"):
+                _apply_llm_settings(provider, api_key, base_url, model_hint)
+
+        with st.expander("💾 Guardar credenciales"):
+            _render_credential_persistence(provider, api_key, base_url)
+
         st.divider()
-
-        # Manual API credentials UI
-        st.subheader("🔑 Configuración manual de API")
-        use_manual = st.checkbox("Usar credenciales manuales (pegar clave/endpoint)")
-        if use_manual:
-            manual_provider = st.selectbox("Proveedor manual", ["Ollama","Gemini","OpenAI","Custom"], index=0)
-            manual_api_key = st.text_input("API Key (si aplica)", value="", type="password")
-            manual_base_url = st.text_input("Base URL / Endpoint (si aplica)", value="")
-            manual_model = st.text_input("Nombre de Modelo (ej. gpt-4o-mini)", value="")
-            manual_timeout = st.number_input("Timeout (segundos)", min_value=5, max_value=600, value=LLM_CONFIG.request_timeout)
-            if st.button("Aplicar credenciales manuales"):
-                LLM_CONFIG.default_provider = manual_provider.lower()
-                if manual_api_key:
-                    # try to set most common keys
-                    setattr(LLM_CONFIG, 'gemini_api_key', manual_api_key)
-                    setattr(LLM_CONFIG, 'openai_api_key', manual_api_key)
-                if manual_base_url:
-                    setattr(LLM_CONFIG, 'ollama_base_url', manual_base_url)
-                    setattr(LLM_CONFIG, 'openai_base_url', manual_base_url)
-                LLM_CONFIG.request_timeout = int(manual_timeout)
-
-                # After applying creds, attempt to discover models automatically
-                try:
-                    provider = ProviderFactory.get_provider()
-                    models = provider.list_models()
-                    if models:
-                        selected = st.selectbox("Modelos detectados", models, index=0)
-                        LLM_CONFIG.default_model = selected
-                        # provider-specific
-                        if LLM_CONFIG.default_provider == 'gemini':
-                            LLM_CONFIG.gemini_model = selected
-                        if LLM_CONFIG.default_provider == 'openai':
-                            LLM_CONFIG.openai_model = selected
-                        st.success(f"Modelos detectados y seleccionado: {selected}")
-                    else:
-                        if manual_model:
-                            LLM_CONFIG.default_model = manual_model
-                            LLM_CONFIG.gemini_model = manual_model
-                            LLM_CONFIG.openai_model = manual_model
-                            st.warning("No se pudieron listar modelos automáticamente; se aplica el modelo que pegaste.")
-                        else:
-                            st.warning("No se encontraron modelos automáticamente. Introduce el nombre manualmente.")
-                except Exception as e:
-                    st.error(f"No se pudo inicializar el proveedor para listar modelos: {e}")
-                    if manual_model:
-                        LLM_CONFIG.default_model = manual_model
-                        LLM_CONFIG.gemini_model = manual_model
-                        LLM_CONFIG.openai_model = manual_model
-
-                if "manager" in st.session_state:
-                    del st.session_state["manager"]
-                st.rerun()
+        with st.expander("Ayuda rápida"):
+            st.markdown(
+                "**Sugerencias de prompts:**\n"
+                "- 'Hola, necesito ayuda para una cita'\n"
+                "- 'Tengo dolor de cabeza y fiebre desde ayer'\n"
+                "- '¿Qué documentos necesito llevar?'\n\n"
+                "**Consejos:**\n"
+                "- Pega tu API key si usas Gemini / OpenAI.\n"
+                "- Usa 'Buscar modelos' para detectar modelos disponibles."
+            )
 
         st.divider()
         if st.button("🔄 Nueva Conversación", use_container_width=True):
             reset_conversation()
 
-def render_patient_status(state_dump: Dict[str, Any], missing_fields: list[str]) -> None:
-    """
-    Renderiza la tabla de estado del paciente en el panel lateral derecho.
-    """
+
+def _apply_llm_settings(provider: str, api_key: str, base_url: str, model: str) -> None:
+    """Apply chosen provider/model settings and invalidate the cached manager."""
+    LLM_CONFIG.default_provider = provider
+    LLM_CONFIG.default_model = model
+    if api_key:
+        LLM_CONFIG.gemini_api_key = api_key
+        LLM_CONFIG.openai_api_key = api_key
+    if base_url:
+        LLM_CONFIG.gemini_base_url = base_url
+        LLM_CONFIG.ollama_base_url = base_url
+    if provider == "gemini":
+        LLM_CONFIG.gemini_model = model
+    if provider == "openai":
+        LLM_CONFIG.openai_model = model
+    st.success(f"Modelo aplicado: {model}")
+    st.rerun()
+
+
+def _render_credential_persistence(provider: str, api_key: str, base_url: str) -> None:
+    """Plaintext .env save, plus optional encrypted save/load if `cryptography` is installed."""
+    if st.button("Guardar en chatbot/.env"):
+        try:
+            env_path = Path(__file__).resolve().parent / ".env"
+            lines = []
+            if api_key:
+                lines.append(f"GEMINI_API_KEY={api_key}")
+                lines.append(f"OPENAI_API_KEY={api_key}")
+            if base_url:
+                lines.append(f"OLLAMA_BASE_URL={base_url}")
+            if LLM_CONFIG.default_model:
+                lines.append(f"DEFAULT_MODEL={LLM_CONFIG.default_model}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            try:
+                os.chmod(env_path, 0o600)
+            except Exception:
+                pass
+            st.success(f"Credenciales guardadas en {env_path}")
+        except Exception as e:
+            st.error(f"No se pudo guardar .env: {e}")
+
+    try:
+        from chatbot.utils.crypto import HAS_CRYPTO, encrypt_dict, decrypt_file
+    except Exception:
+        HAS_CRYPTO = False
+
+    if not HAS_CRYPTO:
+        st.caption("Instala 'cryptography' (pip install cryptography) para guardar credenciales encriptadas.")
+        return
+
+    passphrase = st.text_input("Passphrase para encriptar", type="password", key="enc_pass")
+    passphrase2 = st.text_input("Confirmar passphrase", type="password", key="enc_pass2")
+    if st.button("Encriptar y guardar .env.enc"):
+        if not passphrase or passphrase != passphrase2:
+            st.error("Las passphrases no coinciden o están vacías.")
+        else:
+            data = {}
+            if api_key:
+                data["GEMINI_API_KEY"] = api_key
+                data["OPENAI_API_KEY"] = api_key
+            if base_url:
+                data["OLLAMA_BASE_URL"] = base_url
+            if LLM_CONFIG.default_model:
+                data["DEFAULT_MODEL"] = LLM_CONFIG.default_model
+            try:
+                enc = encrypt_dict(passphrase, data)
+                env_enc_path = Path(__file__).resolve().parent / ".env.enc"
+                env_enc_path.write_text(json.dumps(enc, ensure_ascii=False), encoding="utf-8")
+                try:
+                    os.chmod(env_enc_path, 0o600)
+                except Exception:
+                    pass
+                st.success(f"Credenciales encriptadas guardadas en {env_enc_path}")
+            except Exception as e:
+                st.error(f"Fallo al encriptar: {e}")
+
+    enc_path = Path(__file__).resolve().parent / ".env.enc"
+    if enc_path.exists():
+        dec_pass = st.text_input("Passphrase para desencriptar", type="password", key="dec_pass")
+        if st.button("Cargar .env.enc"):
+            try:
+                data = decrypt_file(dec_pass, str(enc_path))
+                if "GEMINI_API_KEY" in data:
+                    LLM_CONFIG.gemini_api_key = data["GEMINI_API_KEY"]
+                    LLM_CONFIG.openai_api_key = data["GEMINI_API_KEY"]
+                if "OPENAI_API_KEY" in data:
+                    LLM_CONFIG.openai_api_key = data["OPENAI_API_KEY"]
+                if "OLLAMA_BASE_URL" in data:
+                    LLM_CONFIG.ollama_base_url = data["OLLAMA_BASE_URL"]
+                if "DEFAULT_MODEL" in data:
+                    LLM_CONFIG.default_model = data["DEFAULT_MODEL"]
+                st.success("Credenciales cargadas en la configuración de sesión")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fallo al desencriptar: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Patient status panel
+# --------------------------------------------------------------------------- #
+
+def render_patient_status(state_dump: Dict[str, Any], missing_fields: list) -> None:
     st.subheader("📋 Estado del Paciente")
-    
+
     if not state_dump:
         st.info("Aún no se ha recopilado información.")
         return
 
     extracted_data = {k: v for k, v in state_dump.items() if v.get("value") is not None}
-    
+
     if extracted_data:
+        # Single markdown write instead of one st.markdown call per field —
+        # cheaper to render and avoids N separate DOM nodes.
+        rows = []
         for key, data in extracted_data.items():
             value = data["value"]
             conf = data["confidence"]
             color = "green" if conf >= 0.8 else ("orange" if conf >= 0.5 else "red")
-            
-            st.markdown(
-                f"**{key}**: {value} <span style='color:{color}; font-size:0.8em;'>(Confianza: {conf:.2f})</span>", 
-                unsafe_allow_html=True
+            rows.append(
+                f"**{key}**: {value} "
+                f"<span style='color:{color}; font-size:0.8em;'>(Confianza: {conf:.2f})</span>"
             )
-    
+        st.markdown("<br/>".join(rows), unsafe_allow_html=True)
+
     st.divider()
     st.subheader("🎯 Variables Pendientes")
     if missing_fields:
-        for field in missing_fields:
-            st.markdown(f"- `{field}`")
+        st.markdown("\n".join(f"- `{field}`" for field in missing_fields))
     else:
         st.success("¡Información completada!")
 
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+
 def main() -> None:
-    """Función principal: interfaz rediseñada, llamada a proveedores y experiencia mejorada."""
+    initialize_session()
+
     st.title("🏥 Asistente de Admisión Hospitalaria — Chatbot")
-    st.markdown("Una interfaz limpia para ingresar credenciales de LLM, descubrir modelos y mantener conversaciones estructuradas.")
+    st.caption("Interfaz para conversar con el asistente y ver el estado del paciente en tiempo real.")
 
-    # Sidebar: provider + creds + model discovery
-    with st.sidebar:
-        st.header("Configuración LLM")
-        with st.container():
-            st.write("Proveedor")
-            provider = st.selectbox("Proveedor", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0, key='provider_select')
-            api_key = st.text_input("API Key (si aplica)", value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "", type="password")
-            base_url = st.text_input("Base URL / Endpoint (si aplica)", value=getattr(LLM_CONFIG, 'gemini_base_url', '') or LLM_CONFIG.ollama_base_url or '')
-            model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)
-            discover = st.button("🔎 Buscar modelos disponibles")
-        st.markdown("---")
-        with st.expander("Ayuda rápida"):
-            st.write("Sugerencias de prompts:")
-            st.markdown("- 'Hola, necesito ayuda para una cita'\n- 'Tengo dolor de cabeza y fiebre desde ayer'\n- '¿Qué documentos necesito llevar?'")
-            st.write("Consejos:")
-            st.markdown("- Pega tu API key si usas Gemini / OpenAI.\n- Usa 'Buscar modelos' para detectar modelos disponibles.")
-        if st.button("Reiniciar conversación"):
-            reset_conversation()
+    render_sidebar()
 
-    # Apply settings when discovery or model provided
-    if discover:
-        # apply temporary config
-        LLM_CONFIG.default_provider = provider
-        if api_key:
-            LLM_CONFIG.gemini_api_key = api_key
-            LLM_CONFIG.openai_api_key = api_key
-        if base_url:
-            LLM_CONFIG.gemini_base_url = base_url
-            LLM_CONFIG.ollama_base_url = base_url
-        # attempt discovery
-        try:
-            provider_inst = ProviderFactory.get_provider()
-            models = provider_inst.list_models()
-            if models:
-                chosen = st.selectbox("Modelos detectados", models)
-                LLM_CONFIG.default_model = chosen
-                if provider == 'gemini':
-                    LLM_CONFIG.gemini_model = chosen
-                if provider == 'openai':
-                    LLM_CONFIG.openai_model = chosen
-                # remove existing manager so new provider is used
-                if 'manager' in st.session_state:
-                    del st.session_state['manager']
-                st.success(f"Modelo seleccionado: {chosen}")
+    col1, col2 = st.columns([3, 1])
 
-                # offer to save the selected model and creds immediately
-                if st.button("💾 Guardar selección y credenciales en chatbot/.env"):
-                    try:
-                        env_path = Path(__file__).resolve().parent / '.env'
-                        lines = []
-                        if api_key:
-                            lines.append(f"GEMINI_API_KEY={api_key}")
-                            lines.append(f"OPENAI_API_KEY={api_key}")
-                        if base_url:
-                            lines.append(f"OLLAMA_BASE_URL={base_url}")
-                        if LLM_CONFIG.default_model:
-                            lines.append(f"DEFAULT_MODEL={LLM_CONFIG.default_model}")
-                        env_text = "\n".join(lines) + "\n"
-                        # write file with restrictive permissions
-                        env_path.write_text(env_text, encoding='utf-8')
-                        try:
-                            import os
-                            os.chmod(env_path, 0o600)
-                        except Exception:
-                            pass
-                        st.success(f"Credenciales y modelo guardados en {env_path}")
-                    except Exception as e:
-                        st.error(f"No se pudo guardar .env: {e}")
-
-                # Encrypted save (optional)
-                try:
-                    from chatbot.utils.crypto import HAS_CRYPTO, encrypt_dict, decrypt_file
-                except Exception:
-                    HAS_CRYPTO = False
-                else:
-                    # expose encryption UI
-                    if HAS_CRYPTO:
-                        with st.expander("🔐 Guardar encriptado (.env.enc)"):
-                            passphrase = st.text_input("Passphrase para encriptar (no se guarda)", type="password", key="enc_pass")
-                            passphrase2 = st.text_input("Confirmar passphrase", type="password", key="enc_pass2")
-                            if st.button("🔐 Encriptar y guardar .env.enc"):
-                                if not passphrase or passphrase != passphrase2:
-                                    st.error("Las passphrases no coinciden o están vacías.")
-                                else:
-                                    data = {}
-                                    if api_key:
-                                        data['GEMINI_API_KEY'] = api_key
-                                        data['OPENAI_API_KEY'] = api_key
-                                    if base_url:
-                                        data['OLLAMA_BASE_URL'] = base_url
-                                    if LLM_CONFIG.default_model:
-                                        data['DEFAULT_MODEL'] = LLM_CONFIG.default_model
-                                    try:
-                                        enc = encrypt_dict(passphrase, data)
-                                        env_enc_path = Path(__file__).resolve().parent / '.env.enc'
-                                        env_enc_path.write_text(json.dumps(enc, ensure_ascii=False), encoding='utf-8')
-                                        try:
-                                            import os
-                                            os.chmod(env_enc_path, 0o600)
-                                        except Exception:
-                                            pass
-                                        st.success(f"Encrypted credentials saved to {env_enc_path}")
-                                    except Exception as e:
-                                        st.error(f"Encryption failed: {e}")
-                    else:
-                        st.info("Para encriptar las credenciales instala 'cryptography' en el entorno (pip install cryptography)")
-
-                # Decrypt/load existing .env.enc
-                try:
-                    from chatbot.utils.crypto import HAS_CRYPTO, decrypt_file
-                except Exception:
-                    HAS_CRYPTO = False
-                else:
-                    if HAS_CRYPTO:
-                        enc_path = Path(__file__).resolve().parent / '.env.enc'
-                        if enc_path.exists():
-                            with st.expander("🔓 Cargar credenciales encriptadas"):
-                                dec_pass = st.text_input("Passphrase para desencriptar", type="password", key="dec_pass")
-                                if st.button("🔓 Cargar .env.enc"):
-                                    try:
-                                        data = decrypt_file(dec_pass, str(enc_path))
-                                        # apply to LLM_CONFIG
-                                        if 'GEMINI_API_KEY' in data:
-                                            LLM_CONFIG.gemini_api_key = data.get('GEMINI_API_KEY')
-                                            LLM_CONFIG.openai_api_key = data.get('GEMINI_API_KEY')
-                                        if 'OPENAI_API_KEY' in data:
-                                            LLM_CONFIG.openai_api_key = data.get('OPENAI_API_KEY')
-                                        if 'OLLAMA_BASE_URL' in data:
-                                            LLM_CONFIG.ollama_base_url = data.get('OLLAMA_BASE_URL')
-                                        if 'DEFAULT_MODEL' in data:
-                                            LLM_CONFIG.default_model = data.get('DEFAULT_MODEL')
-                                        if 'GEMINI_API_KEY' in data or 'OPENAI_API_KEY' in data:
-                                            # reset manager to pick up new creds
-                                            if 'manager' in st.session_state:
-                                                del st.session_state['manager']
-                                        st.success('Encrypted credentials loaded into session configuration')
-                                        st.experimental_rerun()
-                                    except Exception as e:
-                                        st.error(f"Decryption failed: {e}")
-                    else:
-                        st.info("Para cargar .env.enc instala 'cryptography' en el entorno (pip install cryptography)")
-            else:
-                st.warning("No se encontraron modelos automáticamente. Introduce un nombre manualmente y aplica.")
-        except Exception as e:
-            st.error(f"Error inicializando proveedor: {e}")
-
-            st.success(f"Credenciales guardadas en {env_path}")
-        except Exception as e:
-            st.error(f"No se pudo guardar .env: {e}")
-
-    # Main layout: chat + state/prediction
-    col1, col2 = st.columns([3,1])
     with col1:
         st.subheader("Chat")
-        import streamlit.components.v1 as components
 
-        # CSS: make chat container scrollable and input responsive
-        st.markdown(
-            """
-            <style>
-            #chat-container { height: calc(75vh); overflow-y: auto; padding: 12px; }
-            .chat-bubble { padding:10px; border-radius:10px; margin:8px 0; max-width:75%; }
-            .chat-user { background:#e6f2ff; margin-left:auto; }
-            .chat-assistant { background:#f1f8e9; margin-right:auto; }
-            .chat-meta { font-size:0.8em; color:#666; margin-bottom:6px; }
-            .input-row { display:flex; gap:8px; align-items:flex-end; }
-            .stTextArea textarea { resize: vertical !important; min-height:48px !important; max-height:240px !important; }
-            </style>
-            """,
-            unsafe_allow_html=True
-        )
+        # st.chat_message renders natively and incrementally — Streamlit only
+        # diffs what changed, unlike the previous approach of rebuilding one
+        # giant HTML string every rerun and force-scrolling it via an
+        # injected <script> inside a components.html iframe.
+        chat_box = st.container(height=500)
+        with chat_box:
+            for msg in st.session_state.messages_ui:
+                avatar = "🩺" if msg["role"] == "assistant" else "🙋"
+                with st.chat_message(msg["role"], avatar=avatar):
+                    st.write(msg["content"])
 
-        # Build HTML for all messages
-        msgs_html = ['<div id="chat-container">']
-        for msg in st.session_state.messages_ui:
-            role = msg.get('role', 'assistant')
-            content = msg.get('content', '')
-            safe_content = content.replace('\n', '<br/>')
-            cls = 'chat-assistant' if role == 'assistant' else 'chat-user'
-            icon = '🩺' if role == 'assistant' else '🙋'
-            msgs_html.append(f"<div class='chat-bubble {cls}'><div class='chat-meta'>{icon} {role}</div><div>{safe_content}</div></div>")
-        msgs_html.append('</div>')
-        full_html = '\n'.join(msgs_html)
-        st.markdown(full_html, unsafe_allow_html=True)
+        user_text = st.chat_input("Escribe tu mensaje aquí...")
 
-        # Scroll to bottom
-        components.html('<script>var c=document.getElementById("chat-container"); if(c){c.scrollTop=c.scrollHeight;} </script>', height=0)
+        if user_text and user_text.strip():
+            st.session_state.messages_ui.append({"role": "user", "content": user_text})
+            manager = get_manager()
 
-        # Input area anchored below
-        with st.form(key='chat_form', clear_on_submit=False):
-            cols = st.columns([10,1])
-            with cols[0]:
-                user_text = st.text_area('Escribe tu mensaje aquí...', key='message_input', placeholder='Escribe tu mensaje aquí...')
-            with cols[1]:
-                send = st.form_submit_button('Enviar')
-
-            if send and user_text and user_text.strip():
-                # append and call provider as before
-                st.session_state.messages_ui.append({'role':'user','content':user_text})
-                # ensure manager
+            if manager is not None:
                 try:
-                    if 'manager' not in st.session_state:
-                        prov = ProviderFactory.get_provider()
-                        st.session_state.manager = ConversationManager(prov)
-                        st.session_state.predictor = Predictor()
-                    manager = st.session_state.manager
+                    with st.spinner("El asistente está escribiendo..."):
+                        reply, ready = manager.process_user_input(user_text)
+                    st.session_state.messages_ui.append({"role": "assistant", "content": reply})
                 except Exception as e:
-                    st.error(f"Error inicializando proveedor: {e}")
-                    manager = None
-
-                status_ph = st.empty()
-                # show provider/model prior to calling the LLM (real-time visibility)
-                try:
-                    provider_info = manager.get_provider_info() if manager is not None else {}
-                except Exception:
-                    provider_info = {}
-
-                if manager is not None:
-                    try:
-                        prov_name = provider_info.get('provider') if provider_info else type(manager.provider).__name__
-                        prov_model = provider_info.get('model') if provider_info else getattr(manager.provider, 'model', getattr(manager.provider, 'model_name', None))
-                        status_ph.info(f"Enviando al proveedor {prov_name} (modelo: {prov_model}) y generando respuesta...")
-                        with st.spinner('LLM generando respuesta...'):
-                            reply, ready = manager.process_user_input(user_text)
-
-                        # append assistant reply to UI
-                        st.session_state.messages_ui.append({'role':'assistant','content':reply})
-
-                        # after the call, fetch provider metadata if available
-                        try:
-                            updated_info = manager.get_provider_info()
-                        except Exception:
-                            updated_info = provider_info
-
-                        # show a small summary of provider/model/metadata
-                        with st.expander('Detalles del proveedor y llamada (última)'):
-                            st.write(f"Proveedor: {updated_info.get('provider')}")
-                            st.write(f"Modelo: {updated_info.get('model')}")
-                            meta = updated_info.get('meta')
-                            if meta:
-                                st.write('Metadatos:')
-                                st.json(meta)
-                            else:
-                                st.write('Sin metadatos disponibles')
-
-                        status_ph.success('Respuesta recibida')
-
-                        # clear text area and rerun to refresh UI
-                        st.session_state['message_input'] = ''
-                        st.experimental_rerun()
-                    except Exception as e:
-                        status_ph.error(f'Error: {e}')
-                        st.session_state.last_error = str(e)
+                    st.session_state.messages_ui.append(
+                        {"role": "assistant", "content": f"⚠️ Ocurrió un error: {e}"}
+                    )
+                    st.session_state.last_error = str(e)
+            st.rerun()
 
     with col2:
         st.subheader("Estado paciente & Predicción")
-        try:
-            mgr = st.session_state.get('manager')
-            if mgr is None:
-                # lazy initialize persistent manager
-                prov = ProviderFactory.get_provider()
-                st.session_state.manager = ConversationManager(prov)
-                st.session_state.predictor = Predictor()
-                mgr = st.session_state.manager
+        mgr = get_manager()
+        if mgr is not None:
+            try:
+                state_dump = mgr.get_current_state()
+                missing = mgr.state.get_missing_critical_fields()
+                render_patient_status(state_dump, missing)
 
-            state_dump = mgr.get_current_state()
-            missing = mgr.state.get_missing_critical_fields()
-            render_patient_status(state_dump, missing)
+                if mgr.state.is_ready_for_prediction():
+                    pred = get_predictor().predict(mgr.state)
+                    color_class = "risk-low"
+                    if pred.risk_level == "ALTO":
+                        color_class = "risk-high"
+                    elif pred.risk_level == "MEDIO":
+                        color_class = "risk-medium"
+                    st.markdown(
+                        f"<div class='risk-badge {color_class}'>"
+                        f"Probabilidad de ausencia: {pred.probability:.2%} — {pred.risk_level}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if pred.is_fallback:
+                        st.caption("(Fallback usado — modelo ausente)")
 
-            if mgr.state.is_ready_for_prediction():
-                pred = st.session_state.predictor.predict(mgr.state)
-                # colored risk badge
-                color_class = 'risk-low'
-                if pred.risk_level == 'ALTO':
-                    color_class = 'risk-high'
-                elif pred.risk_level == 'MEDIO':
-                    color_class = 'risk-medium'
-                st.markdown(f"<div class='risk-badge {color_class}'>Probabilidad de ausencia: {pred.probability:.2%} — {pred.risk_level}</div>", unsafe_allow_html=True)
-                if pred.is_fallback:
-                    st.caption("(Fallback usado — modelo ausente)")
-        except Exception as e:
-            st.error(f"Error mostrando estado/predicción: {e}")
+                # Export controls
+                st.divider()
+                st.subheader("📤 Exportar ficha / conversación")
+                import io, csv
+                # Prepare conversation JSON
+                conv = {
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "messages": st.session_state.get("messages_ui", []),
+                    "patient_state": state_dump,
+                }
+                conv_json = json.dumps(conv, ensure_ascii=False, indent=2)
+                st.download_button("Exportar ficha (JSON)", data=conv_json, file_name="ficha.json", mime="application/json")
 
-if __name__ == '__main__':
-    # ensure session defaults
-    if 'messages_ui' not in st.session_state:
-        st.session_state.messages_ui = [{'role':'assistant','content':'Hola. Soy el asistente del hospital. ¿En qué puedo ayudar?'}]
+                # Prepare conversation CSV
+                csv_buf = io.StringIO()
+                writer = csv.writer(csv_buf)
+                writer.writerow(["index", "role", "content"])
+                for idx, m in enumerate(st.session_state.get("messages_ui", [])):
+                    writer.writerow([idx, m.get("role"), m.get("content").replace("\n", " ")])
+                st.download_button("Exportar conversación (CSV)", data=csv_buf.getvalue(), file_name="conversacion.csv", mime="text/csv")
+
+                # Export patient state CSV (field, value, confidence)
+                state_buf = io.StringIO()
+                s_writer = csv.writer(state_buf)
+                s_writer.writerow(["field", "value", "confidence"])
+                if isinstance(state_dump, dict):
+                    for k, v in state_dump.items():
+                        val = v.get("value") if isinstance(v, dict) else str(v)
+                        conf = v.get("confidence") if isinstance(v, dict) else ""
+                        s_writer.writerow([k, val, conf])
+                st.download_button("Exportar estado paciente (CSV)", data=state_buf.getvalue(), file_name="estado_paciente.csv", mime="text/csv")
+
+                # Option to save clinical history text if available
+                ch_path = st.session_state.get("clinical_history_path")
+                if ch_path:
+                    try:
+                        ch_text = Path(ch_path).read_text(encoding="utf-8")
+                        st.download_button("Descargar historia clínica (txt)", data=ch_text, file_name="historia_clinica.txt", mime="text/plain")
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Error mostrando estado/predicción: {e}")
+
+
+if __name__ == "__main__":
     main()
