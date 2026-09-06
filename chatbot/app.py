@@ -227,13 +227,36 @@ def main() -> None:
             if models:
                 chosen = st.selectbox("Modelos detectados", models)
                 LLM_CONFIG.default_model = chosen
-                if provider == 'gemini': LLM_CONFIG.gemini_model = chosen
-                if provider == 'openai': LLM_CONFIG.openai_model = chosen
+                if provider == 'gemini':
+                    LLM_CONFIG.gemini_model = chosen
+                if provider == 'openai':
+                    LLM_CONFIG.openai_model = chosen
+                # remove existing manager so new provider is used
+                if 'manager' in st.session_state:
+                    del st.session_state['manager']
                 st.success(f"Modelo seleccionado: {chosen}")
             else:
                 st.warning("No se encontraron modelos automáticamente. Introduce un nombre manualmente y aplica.")
         except Exception as e:
             st.error(f"Error inicializando proveedor: {e}")
+
+    # Optionally save credentials to chatbot/.env
+    if st.checkbox('Guardar credenciales en chatbot/.env (inseguro en entornos públicos)'):
+        try:
+            env_path = Path(__file__).resolve().parent / '.env'
+            lines = []
+            if api_key:
+                lines.append(f"GEMINI_API_KEY={api_key}")
+                lines.append(f"OPENAI_API_KEY={api_key}")
+            if base_url:
+                lines.append(f"OLLAMA_BASE_URL={base_url}")
+            if LLM_CONFIG.default_model:
+                lines.append(f"DEFAULT_MODEL={LLM_CONFIG.default_model}")
+            env_text = "\n".join(lines) + "\n"
+            env_path.write_text(env_text, encoding='utf-8')
+            st.success(f"Credenciales guardadas en {env_path}")
+        except Exception as e:
+            st.error(f"No se pudo guardar .env: {e}")
 
     # Main layout: chat + state/prediction
     col1, col2 = st.columns([3,1])
@@ -247,8 +270,12 @@ def main() -> None:
         if prompt:
             st.session_state.messages_ui.append({'role':'user','content':prompt})
             try:
-                provider_inst = ProviderFactory.get_provider()
-                manager = ConversationManager(provider_inst)
+                # ensure persistent manager in session
+                if 'manager' not in st.session_state:
+                    prov = ProviderFactory.get_provider()
+                    st.session_state.manager = ConversationManager(prov)
+                    st.session_state.predictor = Predictor()
+                manager = st.session_state.manager
                 reply, ready = manager.process_user_input(prompt)
                 st.session_state.messages_ui.append({'role':'assistant','content':reply})
             except Exception as e:
