@@ -8,7 +8,7 @@ import requests
 from typing import List, Dict
 
 from .base_provider import BaseProvider
-from config import LLM_CONFIG
+from ..config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 

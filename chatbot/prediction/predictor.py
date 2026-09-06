@@ -7,8 +7,8 @@ import logging
 import pandas as pd
 import numpy as np
 
-from conversation.patient_state import PatientState
-from config import PREDICT_CONFIG
+from ..conversation.patient_state import PatientState
+from ..config import PREDICT_CONFIG
 from .model_loader import ModelLoader
 from .prediction_result import PredictionResult
 

@@ -5,7 +5,7 @@ Implementa el patrón Facade para interactuar con UI y Predictor[cite: 2, 4].
 
 import logging
 from typing import Tuple, Dict, Any
-from providers.base_provider import BaseProvider
+from ..providers.base_provider import BaseProvider
 from .patient_state import PatientState
 from .history_manager import HistoryManager
 from .prompt_builder import PromptBuilder

@@ -9,7 +9,7 @@ from google.genai import types
 from typing import List, Dict, Any
 
 from .base_provider import BaseProvider
-from config import LLM_CONFIG
+from ..config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ import logging
 from .base_provider import BaseProvider
 from .ollama_provider import OllamaProvider
 from .gemini_provider import GeminiProvider
-from config import LLM_CONFIG
+from ..config import LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 
