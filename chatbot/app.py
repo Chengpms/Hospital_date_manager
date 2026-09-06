@@ -259,25 +259,35 @@ def main() -> None:
                 if 'manager' in st.session_state:
                     del st.session_state['manager']
                 st.success(f"Modelo seleccionado: {chosen}")
+
+                # offer to save the selected model and creds immediately
+                if st.button("💾 Guardar selección y credenciales en chatbot/.env"):
+                    try:
+                        env_path = Path(__file__).resolve().parent / '.env'
+                        lines = []
+                        if api_key:
+                            lines.append(f"GEMINI_API_KEY={api_key}")
+                            lines.append(f"OPENAI_API_KEY={api_key}")
+                        if base_url:
+                            lines.append(f"OLLAMA_BASE_URL={base_url}")
+                        if LLM_CONFIG.default_model:
+                            lines.append(f"DEFAULT_MODEL={LLM_CONFIG.default_model}")
+                        env_text = "\n".join(lines) + "\n"
+                        # write file with restrictive permissions
+                        env_path.write_text(env_text, encoding='utf-8')
+                        try:
+                            import os
+                            os.chmod(env_path, 0o600)
+                        except Exception:
+                            pass
+                        st.success(f"Credenciales y modelo guardados en {env_path}")
+                    except Exception as e:
+                        st.error(f"No se pudo guardar .env: {e}")
             else:
                 st.warning("No se encontraron modelos automáticamente. Introduce un nombre manualmente y aplica.")
         except Exception as e:
             st.error(f"Error inicializando proveedor: {e}")
 
-    # Optionally save credentials to chatbot/.env
-    if st.checkbox('Guardar credenciales en chatbot/.env (inseguro en entornos públicos)'):
-        try:
-            env_path = Path(__file__).resolve().parent / '.env'
-            lines = []
-            if api_key:
-                lines.append(f"GEMINI_API_KEY={api_key}")
-                lines.append(f"OPENAI_API_KEY={api_key}")
-            if base_url:
-                lines.append(f"OLLAMA_BASE_URL={base_url}")
-            if LLM_CONFIG.default_model:
-                lines.append(f"DEFAULT_MODEL={LLM_CONFIG.default_model}")
-            env_text = "\n".join(lines) + "\n"
-            env_path.write_text(env_text, encoding='utf-8')
             st.success(f"Credenciales guardadas en {env_path}")
         except Exception as e:
             st.error(f"No se pudo guardar .env: {e}")
@@ -292,18 +302,67 @@ def main() -> None:
 
         prompt = st.chat_input("Escribe tu mensaje aquí...")
         if prompt:
+            # append user message immediately to UI
             st.session_state.messages_ui.append({'role':'user','content':prompt})
+            st.session_state.last_user_prompt = prompt
+            st.session_state.last_error = None
+
+            # ensure persistent manager in session
             try:
-                # ensure persistent manager in session
                 if 'manager' not in st.session_state:
                     prov = ProviderFactory.get_provider()
                     st.session_state.manager = ConversationManager(prov)
                     st.session_state.predictor = Predictor()
                 manager = st.session_state.manager
-                reply, ready = manager.process_user_input(prompt)
-                st.session_state.messages_ui.append({'role':'assistant','content':reply})
             except Exception as e:
-                st.error(f"Error procesando mensaje: {e}")
+                st.error(f"Error inicializando proveedor: {e}")
+                st.session_state.last_error = str(e)
+                manager = None
+
+            # UI placeholders for status and assistant reply
+            status_ph = st.empty()
+            reply_ph = st.empty()
+
+            def call_llm(p_text):
+                try:
+                    status_ph.info("Enviando al proveedor y generando respuesta...")
+                    with st.spinner("LLM generando respuesta..."):
+                        reply, ready_flag = manager.process_user_input(p_text)
+                    # append assistant reply to UI
+                    st.session_state.messages_ui.append({'role':'assistant','content':reply})
+                    status_ph.success("Respuesta recibida")
+                    st.session_state.last_error = None
+                    return True
+                except Exception as e:
+                    err = str(e)
+                    st.session_state.last_error = err
+                    status_ph.error(f"Error: {err}")
+                    return False
+
+            # initial call
+            success = False
+            if manager is not None:
+                success = call_llm(prompt)
+
+            # If failed, show retry controls
+            if not success:
+                if st.button("Reintentar"):
+                    if manager is None:
+                        try:
+                            prov = ProviderFactory.get_provider()
+                            st.session_state.manager = ConversationManager(prov)
+                            st.session_state.predictor = Predictor()
+                            manager = st.session_state.manager
+                        except Exception as e:
+                            st.error(f"Error re-inicializando proveedor: {e}")
+                            manager = None
+                    if manager is not None:
+                        call_llm(st.session_state.last_user_prompt)
+
+            # scroll-like behavior: re-render messages list
+            for msg in st.session_state.messages_ui:
+                with st.chat_message(msg['role']):
+                    st.markdown(msg['content'])
 
     with col2:
         st.subheader("Estado paciente & Predicción")
