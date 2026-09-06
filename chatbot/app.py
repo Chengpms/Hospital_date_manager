@@ -4,9 +4,12 @@ Actúa exclusivamente como capa de presentación, delegando toda la lógica
 al ConversationManager y al Predictor.
 """
 
+import csv
+import io
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,7 +59,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-PROVIDERS = ["ollama", "gemini", "openai", "custom"]
+PROVIDERS = ["ollama", "gemini", "openai", "claude", "custom"]
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +96,7 @@ def get_manager() -> Optional[ConversationManager]:
         "manager" not in st.session_state
         or st.session_state.get("_manager_key") != key
         or not hasattr(st.session_state.manager, "process_user_input")
+        or not hasattr(st.session_state.manager, "process_clinical_history")
     ):
         try:
             provider = ProviderFactory.get_provider()
@@ -126,6 +130,251 @@ def get_predictor() -> Predictor:
     if "predictor" not in st.session_state:
         st.session_state.predictor = Predictor()
     return st.session_state.predictor
+
+
+# --------------------------------------------------------------------------- #
+# CSV export of collected patient data
+# --------------------------------------------------------------------------- #
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
+FULL_DATA_CSV_PATH = DATA_DIR / "historial_pacientes.csv"
+
+
+def build_state_csv(state_dump: Dict[str, Any]) -> bytes:
+    """Build a downloadable CSV (campo, valor, confianza) from the current state dump."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["campo", "valor", "confianza"])
+    for key, data in sorted(state_dump.items()):
+        value = data.get("value")
+        if value is None:
+            continue
+        conf = data.get("confidence")
+        writer.writerow([key, value, f"{conf:.2f}" if conf is not None else ""])
+    # utf-8-sig so accented characters (á, é, ñ...) open correctly in Excel.
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def append_state_to_full_csv(state_dump: Dict[str, Any]) -> Path:
+    """Append the current patient's collected data as one row to a cumulative
+    dataset CSV on disk (useful for later retraining the prediction model).
+
+    The header is a union of all fields seen so far, so it stays valid even
+    as new fields appear across different patients/sessions.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    row = {"timestamp": datetime.now().isoformat(timespec="seconds")}
+    for key, data in state_dump.items():
+        if data.get("value") is not None:
+            row[key] = data["value"]
+
+    fieldnames = ["timestamp"] + sorted(k for k in row if k != "timestamp")
+    if FULL_DATA_CSV_PATH.exists():
+        with open(FULL_DATA_CSV_PATH, "r", encoding="utf-8-sig", newline="") as f:
+            existing_header = next(csv.reader(f), [])
+        fieldnames = sorted(set(existing_header) | set(fieldnames), key=lambda c: (c != "timestamp", c))
+
+    write_header = not FULL_DATA_CSV_PATH.exists()
+    with open(FULL_DATA_CSV_PATH, "a", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    return FULL_DATA_CSV_PATH
+
+
+def render_export_section(state_dump: Dict[str, Any]) -> None:
+    """Renders CSV download + 'save to dataset' controls for the collected data."""
+    st.divider()
+    st.subheader("📥 Exportar datos")
+
+    if not state_dump or not any(v.get("value") is not None for v in state_dump.values()):
+        st.caption("Aún no hay datos recabados para exportar.")
+        return
+
+    csv_bytes = build_state_csv(state_dump)
+    st.download_button(
+        "⬇️ Descargar CSV de esta ficha",
+        data=csv_bytes,
+        file_name=f"paciente_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    if st.button("💾 Añadir al historial acumulado (CSV)", use_container_width=True):
+        try:
+            path = append_state_to_full_csv(state_dump)
+            st.success(f"Ficha añadida a {path}")
+        except Exception as e:
+            st.error(f"No se pudo guardar en el historial acumulado: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Clinical history ("ficha") ingestion — LLM reads it and fills the fields
+# --------------------------------------------------------------------------- #
+
+def extract_text_from_upload(uploaded_file) -> str:
+    """Extract raw text from an uploaded .txt, .pdf or .docx clinical record."""
+    name = uploaded_file.name.lower()
+    data = uploaded_file.getvalue()
+
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="ignore")
+
+    if name.endswith(".pdf"):
+        try:
+            import pypdf
+        except ImportError:
+            st.error("Para leer PDFs instala 'pypdf' (pip install pypdf).")
+            return ""
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(data))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception as e:
+            st.error(f"No se pudo leer el PDF: {e}")
+            return ""
+
+    if name.endswith(".docx"):
+        try:
+            import docx
+        except ImportError:
+            st.error("Para leer .docx instala 'python-docx' (pip install python-docx).")
+            return ""
+        try:
+            document = docx.Document(io.BytesIO(data))
+            return "\n".join(p.text for p in document.paragraphs)
+        except Exception as e:
+            st.error(f"No se pudo leer el .docx: {e}")
+            return ""
+
+    st.error("Formato no soportado. Usa .txt, .pdf o .docx.")
+    return ""
+
+
+def render_clinical_history_section() -> None:
+    """Lets the user upload/paste a clinical history record and has the LLM
+    (via ConversationManager.process_clinical_history) extract structured
+    fields from it, the same way it would from a chat message.
+    """
+    st.subheader("📁 Ficha de Historial Clínico")
+    st.caption("Sube o pega el historial clínico del paciente para que el asistente extraiga los datos automáticamente.")
+
+    uploaded = st.file_uploader(
+        "Subir ficha (.txt, .pdf, .docx)", type=["txt", "pdf", "docx"], key="clinical_history_upload"
+    )
+    pasted_text = st.text_area("...o pega el texto del historial aquí", height=120, key="clinical_history_text")
+
+    if st.button("🧠 Procesar historial con el LLM", use_container_width=True):
+        text = ""
+        if uploaded is not None:
+            text = extract_text_from_upload(uploaded)
+        elif pasted_text.strip():
+            text = pasted_text.strip()
+        else:
+            st.warning("Sube un archivo o pega el texto del historial primero.")
+            return
+
+        if not text.strip():
+            return  # extraction already reported the error, nothing to process
+
+        manager = get_manager()
+        if manager is None:
+            return
+
+        if not hasattr(manager, "process_clinical_history"):
+            st.error(
+                "ConversationManager no implementa todavía 'process_clinical_history(texto)'. "
+                "Añade ese método (debe leer el texto del historial, extraer los campos clínicos "
+                "relevantes con el LLM, actualizar `manager.state` igual que process_user_input, "
+                "y devolver un resumen en texto de lo extraído) para habilitar esta función."
+            )
+            return
+
+        with st.spinner("El LLM está leyendo el historial clínico..."):
+            try:
+                summary = manager.process_clinical_history(text)
+            except Exception as e:
+                st.error(f"Error procesando el historial clínico: {e}")
+                return
+
+        summary_text = _format_clinical_summary(summary)
+        is_error = isinstance(summary, dict) and "error" in summary and "assistant_response" not in summary
+
+        st.session_state.clinical_history_path = uploaded.name if uploaded is not None else "texto pegado"
+
+        if is_error:
+            st.session_state.messages_ui.append({"role": "assistant", "content": summary_text})
+            st.error("No se pudo procesar el historial clínico. Revisa los logs para más detalle.")
+        else:
+            st.session_state.messages_ui.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        "He leído la ficha de historial clínico y actualizado los datos del paciente.\n\n"
+                        + summary_text
+                    ).strip(),
+                }
+            )
+            st.success("Historial clínico procesado y datos actualizados.")
+        st.rerun()
+
+
+def _format_clinical_summary(summary: Any) -> str:
+    """Normalize whatever process_clinical_history returns into display text.
+
+    Handles the shape returned by ConversationManager.process_clinical_history
+    ({"assistant_response": ..., "analysis": {...}, "ready_for_prediction": ...}),
+    an error dict ({"error": "..."}), a plain string, a flat dict of extracted
+    fields, or a list of such items. Never assumes a "confidence" value is
+    numeric before formatting it.
+    """
+    if summary is None:
+        return ""
+    if isinstance(summary, str):
+        return summary
+
+    if isinstance(summary, dict):
+        # Error shape from process_clinical_history's except-branch.
+        if "error" in summary and "assistant_response" not in summary:
+            return f"⚠️ Error del LLM al interpretar el historial: {summary['error']}"
+
+        # Expected shape: {"assistant_response": ..., "analysis": {...}, ...}
+        if "assistant_response" in summary:
+            lines = [str(summary["assistant_response"])]
+            analysis = summary.get("analysis") or {}
+            extracted = analysis.get("extracted_data") or {}
+            confidences = analysis.get("confidence") or {}
+
+            field_lines = []
+            for key, value in extracted.items():
+                if value is None:
+                    continue
+                conf = confidences.get(key)
+                conf_str = f" (confianza: {conf:.2f})" if isinstance(conf, (int, float)) else ""
+                field_lines.append(f"- **{key}**: {value}{conf_str}")
+
+            if field_lines:
+                lines.append("")
+                lines.append("Datos extraídos:")
+                lines.extend(field_lines)
+            return "\n".join(lines)
+
+        # Generic fallback for any other dict shape — guards against a
+        # non-numeric "confidence" (e.g. a nested dict) crashing the format.
+        lines = []
+        for key, val in summary.items():
+            if isinstance(val, dict):
+                value = val.get("value", val)
+                conf = val.get("confidence")
+                conf_str = f" (confianza: {conf:.2f})" if isinstance(conf, (int, float)) else ""
+                lines.append(f"- **{key}**: {value}{conf_str}")
+            else:
+                lines.append(f"- **{key}**: {val}")
+        return "\n".join(lines)
+
+    if isinstance(summary, (list, tuple)):
+        return "\n".join(f"- {item}" for item in summary)
+    return str(summary)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +466,10 @@ def render_sidebar() -> None:
 
         with st.expander("💾 Guardar credenciales"):
             _render_credential_persistence(provider, api_key, base_url)
+
+        st.divider()
+        with st.expander("📁 Ficha de Historial Clínico", expanded=False):
+            render_clinical_history_section()
 
         st.divider()
         with st.expander("Ayuda rápida"):
@@ -420,6 +673,7 @@ def main() -> None:
                 state_dump = mgr.get_current_state()
                 missing = mgr.state.get_missing_critical_fields()
                 render_patient_status(state_dump, missing)
+                render_export_section(state_dump)
 
                 if mgr.state.is_ready_for_prediction():
                     pred = get_predictor().predict(mgr.state)
@@ -435,47 +689,6 @@ def main() -> None:
                     )
                     if pred.is_fallback:
                         st.caption("(Fallback usado — modelo ausente)")
-
-                # Export controls
-                st.divider()
-                st.subheader("📤 Exportar ficha / conversación")
-                import io, csv
-                # Prepare conversation JSON
-                conv = {
-                    "generated_at": datetime.utcnow().isoformat(),
-                    "messages": st.session_state.get("messages_ui", []),
-                    "patient_state": state_dump,
-                }
-                conv_json = json.dumps(conv, ensure_ascii=False, indent=2)
-                st.download_button("Exportar ficha (JSON)", data=conv_json, file_name="ficha.json", mime="application/json")
-
-                # Prepare conversation CSV
-                csv_buf = io.StringIO()
-                writer = csv.writer(csv_buf)
-                writer.writerow(["index", "role", "content"])
-                for idx, m in enumerate(st.session_state.get("messages_ui", [])):
-                    writer.writerow([idx, m.get("role"), m.get("content").replace("\n", " ")])
-                st.download_button("Exportar conversación (CSV)", data=csv_buf.getvalue(), file_name="conversacion.csv", mime="text/csv")
-
-                # Export patient state CSV (field, value, confidence)
-                state_buf = io.StringIO()
-                s_writer = csv.writer(state_buf)
-                s_writer.writerow(["field", "value", "confidence"])
-                if isinstance(state_dump, dict):
-                    for k, v in state_dump.items():
-                        val = v.get("value") if isinstance(v, dict) else str(v)
-                        conf = v.get("confidence") if isinstance(v, dict) else ""
-                        s_writer.writerow([k, val, conf])
-                st.download_button("Exportar estado paciente (CSV)", data=state_buf.getvalue(), file_name="estado_paciente.csv", mime="text/csv")
-
-                # Option to save clinical history text if available
-                ch_path = st.session_state.get("clinical_history_path")
-                if ch_path:
-                    try:
-                        ch_text = Path(ch_path).read_text(encoding="utf-8")
-                        st.download_button("Descargar historia clínica (txt)", data=ch_text, file_name="historia_clinica.txt", mime="text/plain")
-                    except Exception:
-                        pass
             except Exception as e:
                 st.error(f"Error mostrando estado/predicción: {e}")
 
