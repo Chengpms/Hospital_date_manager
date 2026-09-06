@@ -369,73 +369,76 @@ def main() -> None:
     col1, col2 = st.columns([3,1])
     with col1:
         st.subheader("Chat")
+        import streamlit.components.v1 as components
+
+        # CSS: make chat container scrollable and input responsive
+        st.markdown(
+            """
+            <style>
+            #chat-container { height: calc(75vh); overflow-y: auto; padding: 12px; }
+            .chat-bubble { padding:10px; border-radius:10px; margin:8px 0; max-width:75%; }
+            .chat-user { background:#e6f2ff; margin-left:auto; }
+            .chat-assistant { background:#f1f8e9; margin-right:auto; }
+            .chat-meta { font-size:0.8em; color:#666; margin-bottom:6px; }
+            .input-row { display:flex; gap:8px; align-items:flex-end; }
+            .stTextArea textarea { resize: vertical !important; min-height:48px !important; max-height:240px !important; }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Build HTML for all messages
+        msgs_html = ['<div id="chat-container">']
         for msg in st.session_state.messages_ui:
-            with st.chat_message(msg['role']):
-                st.markdown(msg['content'])
+            role = msg.get('role', 'assistant')
+            content = msg.get('content', '')
+            safe_content = content.replace('\n', '<br/>')
+            cls = 'chat-assistant' if role == 'assistant' else 'chat-user'
+            icon = '🩺' if role == 'assistant' else '🙋'
+            msgs_html.append(f"<div class='chat-bubble {cls}'><div class='chat-meta'>{icon} {role}</div><div>{safe_content}</div></div>")
+        msgs_html.append('</div>')
+        full_html = '\n'.join(msgs_html)
+        st.markdown(full_html, unsafe_allow_html=True)
 
-        prompt = st.chat_input("Escribe tu mensaje aquí...")
-        if prompt:
-            # append user message immediately to UI
-            st.session_state.messages_ui.append({'role':'user','content':prompt})
-            st.session_state.last_user_prompt = prompt
-            st.session_state.last_error = None
+        # Scroll to bottom
+        components.html('<script>var c=document.getElementById("chat-container"); if(c){c.scrollTop=c.scrollHeight;} </script>', height=0)
 
-            # ensure persistent manager in session
-            try:
-                if 'manager' not in st.session_state:
-                    prov = ProviderFactory.get_provider()
-                    st.session_state.manager = ConversationManager(prov)
-                    st.session_state.predictor = Predictor()
-                manager = st.session_state.manager
-            except Exception as e:
-                st.error(f"Error inicializando proveedor: {e}")
-                st.session_state.last_error = str(e)
-                manager = None
+        # Input area anchored below
+        with st.form(key='chat_form', clear_on_submit=False):
+            cols = st.columns([10,1])
+            with cols[0]:
+                user_text = st.text_area('Escribe tu mensaje aquí...', key='message_input', placeholder='Escribe tu mensaje aquí...')
+            with cols[1]:
+                send = st.form_submit_button('Enviar')
 
-            # UI placeholders for status and assistant reply
-            status_ph = st.empty()
-            reply_ph = st.empty()
-
-            def call_llm(p_text):
+            if send and user_text and user_text.strip():
+                # append and call provider as before
+                st.session_state.messages_ui.append({'role':'user','content':user_text})
+                # ensure manager
                 try:
-                    status_ph.info("Enviando al proveedor y generando respuesta...")
-                    with st.spinner("LLM generando respuesta..."):
-                        reply, ready_flag = manager.process_user_input(p_text)
-                    # append assistant reply to UI
-                    st.session_state.messages_ui.append({'role':'assistant','content':reply})
-                    status_ph.success("Respuesta recibida")
-                    st.session_state.last_error = None
-                    return True
+                    if 'manager' not in st.session_state:
+                        prov = ProviderFactory.get_provider()
+                        st.session_state.manager = ConversationManager(prov)
+                        st.session_state.predictor = Predictor()
+                    manager = st.session_state.manager
                 except Exception as e:
-                    err = str(e)
-                    st.session_state.last_error = err
-                    status_ph.error(f"Error: {err}")
-                    return False
+                    st.error(f"Error inicializando proveedor: {e}")
+                    manager = None
 
-            # initial call
-            success = False
-            if manager is not None:
-                success = call_llm(prompt)
-
-            # If failed, show retry controls
-            if not success:
-                if st.button("Reintentar"):
-                    if manager is None:
-                        try:
-                            prov = ProviderFactory.get_provider()
-                            st.session_state.manager = ConversationManager(prov)
-                            st.session_state.predictor = Predictor()
-                            manager = st.session_state.manager
-                        except Exception as e:
-                            st.error(f"Error re-inicializando proveedor: {e}")
-                            manager = None
-                    if manager is not None:
-                        call_llm(st.session_state.last_user_prompt)
-
-            # scroll-like behavior: re-render messages list
-            for msg in st.session_state.messages_ui:
-                with st.chat_message(msg['role']):
-                    st.markdown(msg['content'])
+                status_ph = st.empty()
+                if manager is not None:
+                    try:
+                        status_ph.info('Enviando al proveedor y generando respuesta...')
+                        with st.spinner('LLM generando respuesta...'):
+                            reply, ready = manager.process_user_input(user_text)
+                        st.session_state.messages_ui.append({'role':'assistant','content':reply})
+                        status_ph.success('Respuesta recibida')
+                        # clear text area
+                        st.session_state['message_input'] = ''
+                        st.experimental_rerun()
+                    except Exception as e:
+                        status_ph.error(f'Error: {e}')
+                        st.session_state.last_error = str(e)
 
     with col2:
         st.subheader("Estado paciente & Predicción")
