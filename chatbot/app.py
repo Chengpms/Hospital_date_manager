@@ -194,97 +194,91 @@ def render_patient_status(state_dump: Dict[str, Any], missing_fields: list[str])
         st.success("¡Información completada!")
 
 def main() -> None:
-    """Función principal que orquesta la construcción de la interfaz."""
-    initialize_session()
-    render_sidebar()
-    
-    header_col, status_col = st.columns([7, 3])
-    with header_col:
-        st.title("🏥 Asistente de Admisión Hospitalaria")
-        st.caption("Interfaz de extracción conversacional y predicción de No-Show")
+    """Función principal: interfaz rediseñada, llamada a proveedores y experiencia mejorada."""
+    st.title("🏥 Asistente de Admisión Hospitalaria — Chatbot")
+    st.markdown("Una interfaz limpia para ingresar credenciales de LLM, descubrir modelos y mantener conversaciones estructuradas.")
 
-    model_path = Path(PREDICT_CONFIG.model_path)
-    model_present = model_path.exists()
-    with status_col:
-        st.metric("LLM Provider", LLM_CONFIG.default_provider.capitalize())
-        if model_present:
-            st.success(f"Modelo: {model_path.name}")
-        else:
-            st.warning("Modelo ausente — se usará fallback matemático")
+    # Sidebar: provider + creds + model discovery
+    with st.sidebar:
+        st.header("Configuración LLM")
+        provider = st.selectbox("Proveedor", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0)
+        api_key = st.text_input("API Key (si aplica)", value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "", type="password")
+        base_url = st.text_input("Base URL / Endpoint (si aplica)", value=getattr(LLM_CONFIG, 'gemini_base_url', '') or LLM_CONFIG.ollama_base_url or '')
+        model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)
+        discover = st.button("🔎 Buscar modelos disponibles")
+        st.markdown("---")
+        if st.button("Reiniciar conversación"):
+            reset_conversation()
 
-    col_chat, col_status = st.columns([7, 3])
-    
-    with col_chat:
-        st.header("💬 Consulta Virtual")
-        
+    # Apply settings when discovery or model provided
+    if discover:
+        # apply temporary config
+        LLM_CONFIG.default_provider = provider
+        if api_key:
+            LLM_CONFIG.gemini_api_key = api_key
+            LLM_CONFIG.openai_api_key = api_key
+        if base_url:
+            LLM_CONFIG.gemini_base_url = base_url
+            LLM_CONFIG.ollama_base_url = base_url
+        # attempt discovery
+        try:
+            provider_inst = ProviderFactory.get_provider()
+            models = provider_inst.list_models()
+            if models:
+                chosen = st.selectbox("Modelos detectados", models)
+                LLM_CONFIG.default_model = chosen
+                if provider == 'gemini': LLM_CONFIG.gemini_model = chosen
+                if provider == 'openai': LLM_CONFIG.openai_model = chosen
+                st.success(f"Modelo seleccionado: {chosen}")
+            else:
+                st.warning("No se encontraron modelos automáticamente. Introduce un nombre manualmente y aplica.")
+        except Exception as e:
+            st.error(f"Error inicializando proveedor: {e}")
+
+    # Main layout: chat + state/prediction
+    col1, col2 = st.columns([3,1])
+    with col1:
+        st.subheader("Chat")
         for msg in st.session_state.messages_ui:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                
-        if prompt := st.chat_input("Escribe tu mensaje aquí..."):
-            st.session_state.messages_ui.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-                
-            with st.chat_message("assistant"):
-                with st.spinner("Analizando respuesta..."):
-                    manager: ConversationManager = st.session_state.manager
-                    reply, is_ready = manager.process_user_input(prompt)
-                    
-                    st.markdown(reply)
-                    st.session_state.messages_ui.append({"role": "assistant", "content": reply})
+            with st.chat_message(msg['role']):
+                st.markdown(msg['content'])
 
-    with col_status:
-        manager = st.session_state.manager
-        current_state = manager.get_current_state()
-        missing = manager.state.get_missing_critical_fields()
-        
-        render_patient_status(current_state, missing)
-        
-        if manager.state.is_ready_for_prediction():
-            st.divider()
-            st.subheader("⚠️ Predicción de Riesgo (No-Show)")
-            with st.spinner("Calculando probabilidad mediante XGBoost..."):
-                predictor: Predictor = st.session_state.predictor
-                result = predictor.predict(manager.state)
-                
-                risk_color = "red" if result.risk_level == "ALTO" else ("orange" if result.risk_level == "MEDIO" else "green")
-                
-                st.markdown(
-                    f"<div style='padding: 10px; border-radius: 5px; background-color: rgba(0,0,0,0.1); border-left: 5px solid {risk_color};'>"
-                    f"<h4>Nivel de Riesgo: {result.risk_level}</h4>"
-                    f"<p>Probabilidad de ausencia: <strong>{result.probability:.2%}</strong></p>"
-                    f"</div>", 
-                    unsafe_allow_html=True
-                )
-                
-                if result.is_fallback:
-                    st.caption("Nota: Se utilizó el modelo matemático de respaldo.")
+        prompt = st.chat_input("Escribe tu mensaje aquí...")
+        if prompt:
+            st.session_state.messages_ui.append({'role':'user','content':prompt})
+            try:
+                provider_inst = ProviderFactory.get_provider()
+                manager = ConversationManager(provider_inst)
+                reply, ready = manager.process_user_input(prompt)
+                st.session_state.messages_ui.append({'role':'assistant','content':reply})
+            except Exception as e:
+                st.error(f"Error procesando mensaje: {e}")
 
-        # --- BYPASS HACKATHON: Cortamos la ejecución de la interfaz aquí ---
-        st.divider()
-        st.info("⚡ Botones de exportación e historial desactivados temporalmente para evitar errores.")
-        return 
-        # -------------------------------------------------------------------
+    with col2:
+        st.subheader("Estado paciente & Predicción")
+        try:
+            mgr = st.session_state.get('manager')
+            if mgr is None:
+                # lazy initialize persistent manager
+                prov = ProviderFactory.get_provider()
+                st.session_state.manager = ConversationManager(prov)
+                st.session_state.predictor = Predictor()
+                mgr = st.session_state.manager
 
-        # (El resto del código de exportación sigue abajo, pero Python lo ignorará gracias al return)
-        st.divider()
-        st.subheader("💾 Export Conversation")
-        fmt = st.selectbox("Format", ("JSON", "CSV"))
-        anonymize = st.checkbox("Anonymize (redact emails/phones/IDs)", value=True)
+            state_dump = mgr.get_current_state()
+            missing = mgr.state.get_missing_critical_fields()
+            render_patient_status(state_dump, missing)
 
-        st.markdown("**📎 Clinical History**")
-        uploaded = st.file_uploader("Upload clinical history (PDF / TXT)", type=["pdf", "txt", "doc", "docx"], key="ch_upload")
-        ch_text = st.text_area("Or paste clinical history text (optional)", height=120, key="ch_text")
+            if mgr.state.is_ready_for_prediction():
+                pred = st.session_state.predictor.predict(mgr.state)
+                st.markdown(f"**Probabilidad ausencia:** {pred.probability:.2%}  \n**Nivel:** {pred.risk_level}")
+                if pred.is_fallback:
+                    st.caption("(Fallback usado — modelo ausente)")
+        except Exception as e:
+            st.error(f"Error mostrando estado/predicción: {e}")
 
-        current_ch = st.session_state.get("clinical_history_path")
-        if current_ch:
-            st.info(f"Saved clinical history: {Path(current_ch).name}")
-
-        col_btn, col_hist = st.columns([1, 2])
-        with col_btn:
-            if st.button("Create export", key="create_export"):
-                pass
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    # ensure session defaults
+    if 'messages_ui' not in st.session_state:
+        st.session_state.messages_ui = [{'role':'assistant','content':'Hola. Soy el asistente del hospital. ¿En qué puedo ayudar?'}]
     main()
