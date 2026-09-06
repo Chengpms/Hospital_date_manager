@@ -32,6 +32,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS for visual polish
+st.markdown(
+    """
+    <style>
+    .chat-bubble-user { background:#e6f2ff; padding:10px; border-radius:10px; margin:6px 0;}
+    .chat-bubble-assistant { background:#f1f8e9; padding:10px; border-radius:10px; margin:6px 0;}
+    .risk-badge { padding:8px 12px; border-radius:6px; color:#fff; font-weight:600; display:inline-block;}
+    .risk-high { background: #d32f2f; }
+    .risk-medium { background: #f57c00; }
+    .risk-low { background: #2e7d32; }
+    .small-note { font-size:0.9em; color:#666; }
+    .sidebar-section { margin-bottom: 12px; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 logger = logging.getLogger(__name__)
 
 def initialize_session() -> None:
@@ -201,12 +218,19 @@ def main() -> None:
     # Sidebar: provider + creds + model discovery
     with st.sidebar:
         st.header("Configuración LLM")
-        provider = st.selectbox("Proveedor", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0)
-        api_key = st.text_input("API Key (si aplica)", value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "", type="password")
-        base_url = st.text_input("Base URL / Endpoint (si aplica)", value=getattr(LLM_CONFIG, 'gemini_base_url', '') or LLM_CONFIG.ollama_base_url or '')
-        model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)
-        discover = st.button("🔎 Buscar modelos disponibles")
+        with st.container():
+            st.write("Proveedor")
+            provider = st.selectbox("", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0)
+            api_key = st.text_input("API Key (si aplica)", value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "", type="password")
+            base_url = st.text_input("Base URL / Endpoint (si aplica)", value=getattr(LLM_CONFIG, 'gemini_base_url', '') or LLM_CONFIG.ollama_base_url or '')
+            model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)
+            discover = st.button("🔎 Buscar modelos disponibles")
         st.markdown("---")
+        with st.expander("Ayuda rápida"):
+            st.write("Sugerencias de prompts:")
+            st.markdown("- 'Hola, necesito ayuda para una cita'\n- 'Tengo dolor de cabeza y fiebre desde ayer'\n- '¿Qué documentos necesito llevar?'")
+            st.write("Consejos:")
+            st.markdown("- Pega tu API key si usas Gemini / OpenAI.\n- Usa 'Buscar modelos' para detectar modelos disponibles.")
         if st.button("Reiniciar conversación"):
             reset_conversation()
 
@@ -298,7 +322,13 @@ def main() -> None:
 
             if mgr.state.is_ready_for_prediction():
                 pred = st.session_state.predictor.predict(mgr.state)
-                st.markdown(f"**Probabilidad ausencia:** {pred.probability:.2%}  \n**Nivel:** {pred.risk_level}")
+                # colored risk badge
+                color_class = 'risk-low'
+                if pred.risk_level == 'ALTO':
+                    color_class = 'risk-high'
+                elif pred.risk_level == 'MEDIO':
+                    color_class = 'risk-medium'
+                st.markdown(f"<div class='risk-badge {color_class}'>Probabilidad de ausencia: {pred.probability:.2%} — {pred.risk_level}</div>", unsafe_allow_html=True)
                 if pred.is_fallback:
                     st.caption("(Fallback usado — modelo ausente)")
         except Exception as e:
