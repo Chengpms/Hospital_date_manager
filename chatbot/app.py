@@ -220,7 +220,7 @@ def main() -> None:
         st.header("Configuración LLM")
         with st.container():
             st.write("Proveedor")
-            provider = st.selectbox("", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0)
+            provider = st.selectbox("Proveedor", ["ollama", "gemini", "openai", "custom"], index=["ollama","gemini","openai","custom"].index(LLM_CONFIG.default_provider) if LLM_CONFIG.default_provider in ["ollama","gemini","openai","custom"] else 0, key='provider_select')
             api_key = st.text_input("API Key (si aplica)", value=LLM_CONFIG.gemini_api_key or LLM_CONFIG.openai_api_key or "", type="password")
             base_url = st.text_input("Base URL / Endpoint (si aplica)", value=getattr(LLM_CONFIG, 'gemini_base_url', '') or LLM_CONFIG.ollama_base_url or '')
             model_hint = st.text_input("Modelo (opcional)", value=LLM_CONFIG.default_model)

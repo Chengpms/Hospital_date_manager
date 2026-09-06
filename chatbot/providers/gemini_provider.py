@@ -56,16 +56,7 @@ class GeminiProvider(BaseProvider):
 
     def generate_response(self, messages: List[Dict[str, str]]) -> str:
         """
-        Envía la petición a Gemini.
-        
-        Args:
-            messages: Historial y contexto estructurado.
-            
-        Returns:
-            str: Respuesta del LLM limpia y en formato JSON.
-            
-        Raises:
-            RuntimeError: Si ocurre un error en la comunicación con la API.
+        Envía la petición a Gemini y reintenta con modelos alternativos si el modelo configurado no está disponible.
         """
         try:
             logger.debug("Enviando petición a Gemini API")
@@ -77,8 +68,48 @@ class GeminiProvider(BaseProvider):
             text = response.text if hasattr(response, "text") else str(response)
             return self._clean_json_response(text)
         except Exception as e:
-            error_msg = f"Error en la comunicación con Gemini API: {str(e)}"
+            # Log original error
+            msg = str(e)
+            error_msg = f"Error en la comunicación con Gemini API: {msg}"
             logger.error(error_msg)
+
+            # Attempt to extract a suggested model from the error message
+            import re
+            fallback_candidates = []
+            m = re.search(r"models/[\w\-\.]+", msg)
+            if m:
+                fallback_candidates.append(m.group(0))
+
+            # Try variants of the configured model (with/without 'models/')
+            if self.model_name:
+                if self.model_name.startswith("models/"):
+                    fallback_candidates.append(self.model_name.replace("models/", ""))
+                else:
+                    fallback_candidates.append("models/" + self.model_name)
+
+            # Recommended modern model
+            fallback_candidates.append("models/gemini-3.6-flash")
+            fallback_candidates.append("gemini-3.6-flash")
+
+            tried = set()
+            for candidate in fallback_candidates:
+                if not candidate or candidate in tried:
+                    continue
+                tried.add(candidate)
+                try:
+                    logger.info(f"Intentando modelo alternativo: {candidate}")
+                    response2 = self.client.models.generate_content(
+                        model=candidate,
+                        contents=self._convert_messages_format(messages),
+                        config=self.generation_config,
+                    )
+                    text2 = response2.text if hasattr(response2, "text") else str(response2)
+                    return self._clean_json_response(text2)
+                except Exception as e2:
+                    logger.debug(f"Fallback model {candidate} failed: {e2}")
+                    continue
+
+            # If all retries failed, raise runtime error
             raise RuntimeError(error_msg) from e
 
     def list_models(self) -> list:
